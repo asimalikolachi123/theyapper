@@ -254,7 +254,7 @@ export default function Platform({ page, param = "" }: Props) {
     if (!email.trim() || !password) { say("Enter your email and password."); return; }
     setBusy(true);
     const result = authMode === "signup"
-      ? await client.auth.signUp({ email: email.trim(), password, options: { data: { name: displayName.trim() || email.split("@")[0] } } })
+      ? await client.auth.signUp({ email: email.trim(), password, options: { data: { name: displayName.trim() || email.split("@")[0] }, emailRedirectTo: window.location.origin + "/auth/callback?next=/" } })
       : await client.auth.signInWithPassword({ email: email.trim(), password });
     setBusy(false);
     if (result.error) { say(result.error.message); return; }
@@ -610,7 +610,7 @@ export function AuthPage({ mode }: { mode: "signin" | "signup" }) {
         const { data: existing, error: lookupError } = await client.from("profiles").select("id").eq("username", username.toLowerCase()).maybeSingle();
         if (lookupError) throw new Error("Could not validate username right now. Please try again.");
         if (existing) throw new Error("That username is already taken. Try another one.");
-        const { data, error } = await client.auth.signUp({ email: cleanEmail, password, options: { data: { name: displayName.trim() || username, username: username.toLowerCase() }, emailRedirectTo: window.location.origin + "/" } });
+        const { data, error } = await client.auth.signUp({ email: cleanEmail, password, options: { data: { name: displayName.trim() || username, username: username.toLowerCase() }, emailRedirectTo: window.location.origin + "/auth/callback?next=/" } });
         if (error) throw error;
         if (data.session) { window.location.replace("/"); return; }
         setNotice("Account created. Check your inbox to confirm your email, then sign in. Check spam if needed.");
