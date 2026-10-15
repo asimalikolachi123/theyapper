@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 import {
-  Home, Compass, Search, Bell, MessageCircle, Bookmark, UserRound, Settings,
+  Home, Compass, Search, Bell, MessageCircle, Bookmark, UserRound, Settings, Clapperboard,
   Plus, ImagePlus, Heart, Repeat2, MessageSquare, Share2, MoreHorizontal,
   Sun, Moon, Send, ArrowLeft, Check, X, Sparkles, Users, Hash, Link2,
   Camera, LockKeyhole, Shield, SlidersHorizontal, LogOut, ChevronRight,
@@ -24,6 +24,7 @@ type Post = {
   liked?: boolean; saved?: boolean; reposted?: boolean;
 };
 type Notice = { id: string; kind: string; created_at: string; read_at?: string | null; actor?: Profile | null; post_id?: string | null };
+type Reel = { id: string; user_id: string; video_url: string; caption: string; created_at: string; views_count: number; profiles?: Profile | null; likes_count: number; comments_count: number; liked: boolean };
 type Props = { page: string; param?: string };
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -53,7 +54,7 @@ const titleFor = (page: string) => ({
 } as Record<string,string>)[page] || "theYapper";
 const navItems = [
   { href: "/", label: "Home", icon: Home }, { href: "/explore", label: "Explore", icon: Compass },
-  { href: "/search", label: "Search", icon: Search }, { href: "/notifications", label: "Notifications", icon: Bell },
+  { href: "/search", label: "Search", icon: Search }, { href: "/reels", label: "Reels", icon: Clapperboard }, { href: "/notifications", label: "Notifications", icon: Bell },
   { href: "/messages", label: "Messages", icon: MessageCircle }, { href: "/bookmarks", label: "Bookmarks", icon: Bookmark },
   { href: "/communities", label: "Topic Circles", icon: Users }
 ];
@@ -151,6 +152,15 @@ export default function Platform({ page, param = "" }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [errorText, setErrorText] = useState("");
   const [detailPost, setDetailPost] = useState<Post | null>(null);
+  const [reels, setReels] = useState<Reel[]>([]);
+  const [reelLoading, setReelLoading] = useState(false);
+  const [reelFile, setReelFile] = useState<File | null>(null);
+  const [reelCaption, setReelCaption] = useState("");
+  const [reelBusy, setReelBusy] = useState(false);
+  const [activeCommentReelId, setActiveCommentReelId] = useState<string | null>(null);
+  const [reelComments, setReelComments] = useState<any[]>([]);
+  const [reelCommentDraft, setReelCommentDraft] = useState("");
+  const [viewedReelIds, setViewedReelIds] = useState<string[]>([]);
   const [notificationPrefs, setNotificationPrefs] = useState({ likes:true, replies:true, follows:true, mentions:true, messages:true, community_activity:true });
 
   const say = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 3200); };
@@ -209,6 +219,7 @@ export default function Platform({ page, param = "" }: Props) {
 
   useEffect(() => { void hydrate(); if (!client) return; const { data: { subscription } } = client.auth.onAuthStateChange(() => { window.setTimeout(() => void hydrate(), 0); }); return () => subscription.unsubscribe(); }, [client, hydrate]);
   useEffect(() => { try { setDark(window.localStorage.getItem("yapper-theme") === "dark"); } catch {} }, []);
+  useEffect(() => { if (page === "reels") void loadReels(); }, [page, client, user?.id]);
   useEffect(() => { if (dark) { document.documentElement.dataset.theme = "dark"; } else { delete document.documentElement.dataset.theme; } try { window.localStorage.setItem("yapper-theme", dark ? "dark" : "light"); } catch {} }, [dark]);
   useEffect(() => { if (page !== "messages" || !client || !user) return; const channel = client.channel("messages-" + user.id).on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (payload: any) => { const m = payload.new; if (m.sender_id === user.id || m.receiver_id === user.id) { setMessages(old => old.some(x => x.id === m.id) ? old : [...old, m]); void loadChats(); } }).subscribe(); return () => { void client.removeChannel(channel); }; }, [page, client, user?.id]);
 
@@ -387,6 +398,101 @@ export default function Platform({ page, param = "" }: Props) {
     if (error) say(error.message); else { setCollectionName(""); await hydrate(); say("Collection created."); }
   }
 
+
+  async function loadReels() {
+    if (!client) return;
+    setReelLoading(true);
+    const { data, error } = await client.from("reels").select("id,user_id,video_url,caption,created_at,views_count").order("created_at", { ascending: false }).limit(60);
+    if (error) { say("Could not load Reels: " + error.message); setReelLoading(false); return; }
+    const rows = data || [];
+    const authorIds = Array.from(new Set(rows.map((r: any) => r.user_id)));
+    const reelIds = rows.map((r: any) => r.id);
+    const [profileResult, likeResult, commentResult, myLikeResult] = await Promise.all([
+      authorIds.length ? client.from("profiles").select("id,username,display_name,avatar_url,accent_color").in("id", authorIds) : Promise.resolve({ data: [] as any[] }),
+      reelIds.length ? client.from("reel_likes").select("reel_id,user_id").in("reel_id", reelIds) : Promise.resolve({ data: [] as any[] }),
+      reelIds.length ? client.from("reel_comments").select("reel_id").in("reel_id", reelIds) : Promise.resolve({ data: [] as any[] }),
+      user && reelIds.length ? client.from("reel_likes").select("reel_id").eq("user_id", user.id).in("reel_id", reelIds) : Promise.resolve({ data: [] as any[] })
+    ]);
+    const profilesById = new Map((profileResult.data || []).map((p: any) => [p.id, p]));
+    const likeCounts = new Map<string, number>();
+    (likeResult.data || []).forEach((l: any) => likeCounts.set(l.reel_id, (likeCounts.get(l.reel_id) || 0) + 1));
+    const commentCounts = new Map<string, number>();
+    (commentResult.data || []).forEach((c: any) => commentCounts.set(c.reel_id, (commentCounts.get(c.reel_id) || 0) + 1));
+    const likedIds = new Set((myLikeResult.data || []).map((l: any) => l.reel_id));
+    setReels(rows.map((r: any) => ({
+      ...r, profiles: profilesById.get(r.user_id) || null,
+      likes_count: likeCounts.get(r.id) || 0, comments_count: commentCounts.get(r.id) || 0,
+      liked: likedIds.has(r.id)
+    })));
+    setReelLoading(false);
+  }
+
+  async function publishReel() {
+    if (!client || !user) { setAuthMode("signin"); say("Sign in to upload a Reel."); return; }
+    if (!reelFile) { say("Choose a video first."); return; }
+    if (reelFile.size > 50 * 1024 * 1024) { say("Reels must be 50 MB or smaller."); return; }
+    if (!["video/mp4", "video/webm", "video/quicktime"].includes(reelFile.type)) { say("Choose an MP4, WebM or MOV video."); return; }
+    setReelBusy(true);
+    const extension = reelFile.name.split(".").pop()?.toLowerCase() || "mp4";
+    const path = user.id + "/" + crypto.randomUUID() + "." + extension;
+    const { error: uploadError } = await client.storage.from("reel-videos").upload(path, reelFile, { contentType: reelFile.type, upsert: false });
+    if (uploadError) { setReelBusy(false); say("Video upload failed: " + uploadError.message); return; }
+    const videoUrl = client.storage.from("reel-videos").getPublicUrl(path).data.publicUrl;
+    const { error } = await client.from("reels").insert({ user_id: user.id, video_url: videoUrl, caption: reelCaption.trim().slice(0, 1000) });
+    if (error) {
+      await client.storage.from("reel-videos").remove([path]);
+      setReelBusy(false); say("Reel could not be published: " + error.message); return;
+    }
+    setReelFile(null); setReelCaption(""); setReelBusy(false);
+    const picker = document.getElementById("reel-video-picker") as HTMLInputElement | null;
+    if (picker) picker.value = "";
+    say("Your Reel is live."); await loadReels();
+  }
+
+  async function toggleReelLike(reel: Reel) {
+    if (!client || !user) { setAuthMode("signin"); say("Sign in to like Reels."); return; }
+    const wasLiked = reel.liked;
+    setReels(old => old.map(r => r.id === reel.id ? { ...r, liked: !wasLiked, likes_count: Math.max(0, r.likes_count + (wasLiked ? -1 : 1)) } : r));
+    const result = wasLiked
+      ? await client.from("reel_likes").delete().eq("reel_id", reel.id).eq("user_id", user.id)
+      : await client.from("reel_likes").insert({ reel_id: reel.id, user_id: user.id });
+    if (result.error) { say("Like could not be saved: " + result.error.message); await loadReels(); }
+  }
+
+  async function recordReelView(reelId: string) {
+    if (!client || !user || viewedReelIds.includes(reelId)) return;
+    setViewedReelIds(old => old.includes(reelId) ? old : [...old, reelId]);
+    setReels(old => old.map(r => r.id === reelId ? { ...r, views_count: (r.views_count || 0) + 1 } : r));
+    const { error } = await client.rpc("increment_reel_views", { reel_uuid: reelId });
+    if (error) {
+      setReels(old => old.map(r => r.id === reelId ? { ...r, views_count: Math.max(0, (r.views_count || 1) - 1) } : r));
+      setViewedReelIds(old => old.filter(id => id !== reelId));
+    }
+  }
+
+  async function openReelComments(reelId: string) {
+    if (!client) return;
+    if (activeCommentReelId === reelId) { setActiveCommentReelId(null); return; }
+    setActiveCommentReelId(reelId);
+    const { data, error } = await client.from("reel_comments").select("id,reel_id,user_id,content,created_at").eq("reel_id", reelId).order("created_at", { ascending: true }).limit(100);
+    if (error) { say("Could not load comments: " + error.message); return; }
+    const ids = Array.from(new Set((data || []).map((c: any) => c.user_id)));
+    const { data: profiles } = ids.length ? await client.from("profiles").select("id,username,display_name,avatar_url,accent_color").in("id", ids) : { data: [] as any[] };
+    const map = new Map((profiles || []).map((p: any) => [p.id, p]));
+    setReelComments((data || []).map((c: any) => ({ ...c, profiles: map.get(c.user_id) || null })));
+  }
+
+  async function sendReelComment(reelId: string) {
+    if (!client || !user) { setAuthMode("signin"); return; }
+    const content = reelCommentDraft.trim();
+    if (!content || content.length > 500) return;
+    setReelCommentDraft("");
+    const { error } = await client.from("reel_comments").insert({ reel_id: reelId, user_id: user.id, content });
+    if (error) { setReelCommentDraft(content); say("Comment could not be posted: " + error.message); return; }
+    setReels(old => old.map(r => r.id === reelId ? { ...r, comments_count: r.comments_count + 1 } : r));
+    await openReelComments(reelId);
+  }
+
   const allPosts = useMemo(() => {
     let result = posts;
     if (page === "home" && profileTab === "Following") result = result.filter(p => following.includes(p.author_id));
@@ -492,6 +598,26 @@ export default function Platform({ page, param = "" }: Props) {
         <div>{page !== "home" && <a href="/" className="back-link"><ArrowLeft size={16}/> Back to Home</a>}<h1>{title}</h1><p>{page === "home" ? "Good conversations start here." : page === "explore" ? "Find people and ideas worth your attention." : page === "search" ? "Search people, posts and hashtags." : page === "messages" ? "Private conversations, kept private." : page === "notifications" ? "A thoughtful recap of what matters." : page === "communities" ? "Small circles. Better conversations." : "Your space, your pace."}</p></div>
         {page === "notifications" && <button className="outline-button small" onClick={() => void markNotificationsRead()}><Check size={15}/> Mark all read</button>}
       </header>
+
+
+      {page === "reels" && <section className="reels-page">
+        <div className="reels-intro"><div><span className="eyebrow"><Clapperboard size={14}/> SHORT VIDEOS</span><h2>Reels, made by your community.</h2><p>Discover creators, ideas and moments — one swipe at a time.</p></div></div>
+        <section className="reel-upload-panel">
+          <div className="reel-upload-heading"><div className="reel-upload-icon"><Upload size={19}/></div><div><b>Share a Reel</b><small>MP4, WebM or MOV · up to 50 MB</small></div></div>
+          <label className="reel-file-picker"><Clapperboard size={18}/><span>{reelFile ? reelFile.name : "Choose a video"}</span><input id="reel-video-picker" type="file" accept="video/mp4,video/webm,video/quicktime" onChange={e => setReelFile(e.target.files?.[0] || null)}/></label>
+          <textarea value={reelCaption} onChange={e => setReelCaption(e.target.value.slice(0,1000))} maxLength={1000} placeholder="Write a caption for your Reel…" aria-label="Reel caption"/>
+          <div className="reel-upload-footer"><small>{reelCaption.length}/1000</small><button className="primary-button" disabled={reelBusy || !reelFile} onClick={() => void publishReel()}>{reelBusy ? <LoaderCircle size={16} className="spin"/> : <Upload size={16}/>} {reelBusy ? "Uploading…" : "Publish Reel"}</button></div>
+        </section>
+        <div className="reels-feed-heading"><h3>Explore Reels</h3><span>{reels.length} {reels.length === 1 ? "video" : "videos"}</span></div>
+        {reelLoading ? <div className="loading-stack"><div className="skeleton-post"/></div> : !reels.length ? <EmptyState icon={Clapperboard} title="Your Reels feed starts here" detail="Be the first to share a short video with the theYapper community."/> : <div className="reels-feed">{reels.map(reel => <article className="reel-card" key={reel.id}>
+          <div className="reel-video-shell"><video className="reel-video" src={reel.video_url} controls playsInline muted preload="metadata" onPlay={e => { document.querySelectorAll(".reel-video").forEach(v => { if (v !== e.currentTarget) (v as HTMLVideoElement).pause(); }); void recordReelView(reel.id); }} />
+            <div className="reel-overlay-top"><a href={reel.profiles ? "/u/" + reel.profiles.username : "#"} className="reel-creator"><Avatar profile={reel.profiles} size="sm"/><span><b>{reel.profiles?.display_name || "theYapper creator"}</b><small>@{reel.profiles?.username || "creator"} · {timeAgo(reel.created_at)}</small></span></a><button className="reel-share-button" aria-label="Share Reel" onClick={async () => { const url = window.location.origin + "/reels"; try { if (navigator.share) await navigator.share({ title: "theYapper Reel", url }); else { await navigator.clipboard.writeText(url); say("Reels link copied."); } } catch (err) { if (err instanceof Error && err.name !== "AbortError") say("Could not share this Reel."); } }}><Share2 size={17}/></button></div>
+            {reel.caption && <div className="reel-caption-overlay"><p>{reel.caption}</p></div>}
+          </div>
+          <div className="reel-actions"><button className={reel.liked ? "reel-action liked" : "reel-action"} onClick={() => void toggleReelLike(reel)} aria-label="Like Reel"><Heart size={19} fill={reel.liked ? "currentColor" : "none"}/><span>{reel.likes_count}</span></button><button className="reel-action" onClick={() => void openReelComments(reel.id)} aria-label="Comments"><MessageCircle size={19}/><span>{reel.comments_count}</span></button><span className="reel-action reel-views"><Globe size={17}/><span>{reel.views_count || 0} views</span></span><a className="reel-action" href={reel.profiles ? "/u/" + reel.profiles.username : "/reels"} aria-label="View creator"><UserRound size={18}/><span>Creator</span></a></div>
+          {activeCommentReelId === reel.id && <section className="reel-comments"><h4>Comments</h4>{reelComments.length ? reelComments.map(c => <div className="reel-comment" key={c.id}><Avatar profile={c.profiles} size="sm"/><div><b>{c.profiles?.display_name || "Yapper"} <small>@{c.profiles?.username || "user"}</small></b><p>{c.content}</p><time>{timeAgo(c.created_at)} ago</time></div></div>) : <p className="muted-note">No comments yet. Start the conversation.</p>}<form onSubmit={e => { e.preventDefault(); void sendReelComment(reel.id); }}><input value={reelCommentDraft} onChange={e => setReelCommentDraft(e.target.value.slice(0,500))} placeholder="Write a comment…" aria-label="Reel comment" maxLength={500}/><button className="primary-button" disabled={!reelCommentDraft.trim()}><Send size={15}/> Send</button></form></section>}
+        </article>)}</div>}
+      </section>}
 
       {page === "home" && <><div className="feed-switch"><a className={profileTab === "For you" ? "selected" : ""} href="/" onClick={() => setProfileTab("For you")}>For you</a><button className={profileTab === "Following" ? "selected" : ""} onClick={() => setProfileTab("Following")}>Following</button></div><section className="composer">
         <Avatar profile={me} size="lg"/><div className="composer-content"><textarea aria-label="Write a post" placeholder={user ? "What would you like to yap about?" : "Join the conversation — sign in to post"} value={draft} maxLength={500} onChange={e => setDraft(e.target.value)}/>
