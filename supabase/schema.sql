@@ -113,3 +113,84 @@ end;
 $$;
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created after insert on auth.users for each row execute procedure public.handle_new_user();
+
+
+
+-- theYapper conversation intents, direct messages and activity notifications.
+alter table public.posts add column if not exists context_tag text not null default 'Open conversation';
+alter table public.posts drop constraint if exists posts_context_tag_check;
+alter table public.posts add constraint posts_context_tag_check
+  check (context_tag in ('Open conversation','Need advice','Teach me','Respectful debate','Just sharing','Build together'));
+
+create table if not exists public.messages (
+  id uuid primary key default gen_random_uuid(),
+  sender_id uuid not null references public.profiles(id) on delete cascade,
+  receiver_id uuid not null references public.profiles(id) on delete cascade,
+  content text not null check (char_length(content) between 1 and 4000),
+  read_at timestamptz,
+  created_at timestamptz not null default now(),
+  constraint messages_no_self check (sender_id <> receiver_id)
+);
+create index if not exists messages_pair_created_idx on public.messages(sender_id,receiver_id,created_at);
+alter table public.messages enable row level security;
+drop policy if exists "Message participants can read" on public.messages;
+create policy "Message participants can read" on public.messages for select to authenticated using (auth.uid()=sender_id or auth.uid()=receiver_id);
+drop policy if exists "Users send messages as themselves" on public.messages;
+create policy "Users send messages as themselves" on public.messages for insert to authenticated with check (auth.uid()=sender_id);
+drop policy if exists "Recipients mark messages read" on public.messages;
+create policy "Recipients mark messages read" on public.messages for update to authenticated using (auth.uid()=receiver_id) with check (auth.uid()=receiver_id);
+
+create table if not exists public.notifications (
+  id uuid primary key default gen_random_uuid(),
+  recipient_id uuid not null references public.profiles(id) on delete cascade,
+  actor_id uuid references public.profiles(id) on delete set null,
+  post_id uuid references public.posts(id) on delete cascade,
+  kind text not null check (kind in ('like','comment','follow','message')),
+  read_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists notifications_recipient_created_idx on public.notifications(recipient_id,created_at desc);
+alter table public.notifications enable row level security;
+drop policy if exists "Users read their notifications" on public.notifications;
+create policy "Users read their notifications" on public.notifications for select to authenticated using (auth.uid()=recipient_id);
+drop policy if exists "Users update their notifications" on public.notifications;
+create policy "Users update their notifications" on public.notifications for update to authenticated using (auth.uid()=recipient_id) with check (auth.uid()=recipient_id);
+drop policy if exists "Authenticated users create notifications" on public.notifications;
+create policy "Authenticated users create notifications" on public.notifications for insert to authenticated with check (auth.uid()=actor_id);
+
+create or replace function public.notify_post_activity()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare target_user uuid; target_post uuid; notification_kind text; actor uuid;
+begin
+ if tg_table_name='likes' then
+  select author_id into target_user from public.posts where id=new.post_id;
+  target_post:=new.post_id; notification_kind:='like'; actor:=new.user_id;
+ elsif tg_table_name='comments' then
+  select author_id into target_user from public.posts where id=new.post_id;
+  target_post:=new.post_id; notification_kind:='comment'; actor:=new.author_id;
+ elsif tg_table_name='follows' then
+  target_user:=new.following_id; notification_kind:='follow'; actor:=new.follower_id;
+ elsif tg_table_name='messages' then
+  target_user:=new.receiver_id; notification_kind:='message'; actor:=new.sender_id;
+ end if;
+ if target_user is not null and target_user <> actor then
+  insert into public.notifications(recipient_id,actor_id,post_id,kind)
+  values(target_user,actor,target_post,notification_kind);
+ end if;
+ return new;
+end; $$;
+
+drop trigger if exists notify_like_activity on public.likes;
+create trigger notify_like_activity after insert on public.likes for each row execute function public.notify_post_activity();
+drop trigger if exists notify_comment_activity on public.comments;
+create trigger notify_comment_activity after insert on public.comments for each row execute function public.notify_post_activity();
+drop trigger if exists notify_follow_activity on public.follows;
+create trigger notify_follow_activity after insert on public.follows for each row execute function public.notify_post_activity();
+drop trigger if exists notify_message_activity on public.messages;
+create trigger notify_message_activity after insert on public.messages for each row execute function public.notify_post_activity();
+
+do $$ begin
+  alter publication supabase_realtime add table public.messages;
+exception when duplicate_object then null;
+when undefined_object then null;
+end $$;
