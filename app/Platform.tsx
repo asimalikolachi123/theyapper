@@ -134,6 +134,7 @@ export default function Platform({ page, param = "" }: Props) {
   const [profileTarget, setProfileTarget] = useState<Profile | null>(null);
   const [edit, setEdit] = useState({ display_name: "", username: "", bio: "", location: "", website: "", pronouns: "", accent_color: "#6558e8", avatar_url: "", cover_url: "" });
   const [profileTab, setProfileTab] = useState("Posts");
+  const [profileLikedIds, setProfileLikedIds] = useState<string[]>([]);
   const [messagePeople, setMessagePeople] = useState<Profile[]>([]);
   const [activeChat, setActiveChat] = useState<Profile | null>(null);
   const [messages, setMessages] = useState<any[]>([]);
@@ -381,11 +382,11 @@ export default function Platform({ page, param = "" }: Props) {
       result = result.filter(p => p.author_id === profileTarget.id);
       if (profileTab === "Media") result = result.filter(p => (p.image_urls || []).length > 0 || p.image_url);
       if (profileTab === "Replies") result = [];
-      if (profileTab === "Likes") result = result.filter(p => p.liked);
+      if (profileTab === "Likes") result = posts.filter(p => profileLikedIds.includes(p.id));
     }
     if (page === "community" && activeCommunity) result = result.filter((p: any) => p.community_id === activeCommunity.id);
     return result;
-  }, [posts, page, profileTab, following, savedIds, param, profileTarget, activeCommunity]);
+  }, [posts, page, profileTab, following, savedIds, param, profileTarget, activeCommunity, profileLikedIds]);
 
   useEffect(() => {
     if (!client || !user || !["messages"].includes(page)) return;
@@ -395,6 +396,7 @@ export default function Platform({ page, param = "" }: Props) {
   useEffect(() => {
     if (!client || !param || !["profile", "community", "post", "messages"].includes(page)) return;
     if (page === "profile") {
+      setProfileLikedIds([]);
       void client.from("profiles").select("*").eq("username", param).maybeSingle().then(async ({ data, error }) => {
         if (error) { say(error.message); setProfileTarget(null); return; }
         if (!data) { setProfileTarget(null); return; }
@@ -405,6 +407,8 @@ export default function Platform({ page, param = "" }: Props) {
         ]);
         const enriched = { ...target, followers_count: followersCount || 0, following_count: followingCount || 0 };
         setProfileTarget(enriched);
+        const { data: likedRows, error: likedError } = await client.from("likes").select("post_id").eq("user_id", target.id).order("created_at", { ascending: false }).limit(100);
+        if (!likedError) setProfileLikedIds((likedRows || []).map((row: any) => row.post_id));
         if (user?.id === target.id) setMe(enriched);
         if (user?.id === target.id) {
           setEdit({ display_name: data.display_name || "", username: data.username || "", bio: data.bio || "", location: data.location || "", website: data.website || "", pronouns: data.pronouns || "", accent_color: data.accent_color || "#6558e8", avatar_url: data.avatar_url || "", cover_url: data.cover_url || "" });
@@ -583,6 +587,9 @@ export function AuthPage({ mode }: { mode: "signin" | "signup" }) {
     setBusy(true);
     try {
       if (kind === "signup") {
+        const { data: existing, error: lookupError } = await client.from("profiles").select("id").eq("username", username.toLowerCase()).maybeSingle();
+        if (lookupError) throw new Error("Could not validate username right now. Please try again.");
+        if (existing) throw new Error("That username is already taken. Try another one.");
         const { data, error } = await client.auth.signUp({ email: cleanEmail, password, options: { data: { name: displayName.trim() || username, username: username.toLowerCase() }, emailRedirectTo: window.location.origin + "/" } });
         if (error) throw error;
         if (data.session) { window.location.replace("/"); return; }
@@ -604,6 +611,6 @@ export function AuthPage({ mode }: { mode: "signin" | "signup" }) {
       <button className="primary-button auth-submit" disabled={busy}>{busy ? "Please wait…" : kind === "signup" ? "Create account" : kind === "reset" ? "Send reset link" : "Sign in"} <ChevronRight size={17}/></button>
     </form>
     {kind === "signin" && <button className="auth-forgot" onClick={()=>{setKind("reset");setErrorText("");setNotice("");}}>Forgot password?</button>}
-    <div className="auth-page-switch">{kind === "signup" ? "Already have an account?" : kind === "reset" ? "Remembered it?" : "New to theYapper?"} <button onClick={()=>{setKind(kind === "signup" ? "signin" : "signup");setErrorText("");setNotice("");}}>{kind === "signup" || kind === "reset" ? "Sign in" : "Create account"}</button></div>
+    <div className="auth-page-switch">{kind === "signup" ? "Already have an account?" : kind === "reset" ? "Remembered it?" : "New to theYapper?"} <button onClick={()=>{setKind(kind === "signin" ? "signup" : "signin");setErrorText("");setNotice("");}}>{kind === "signup" || kind === "reset" ? "Sign in" : "Create account"}</button></div>
   </section><p className="auth-page-foot">A better place for thoughtful conversations.</p></main>;
 }
