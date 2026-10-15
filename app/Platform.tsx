@@ -149,6 +149,8 @@ export default function Platform({ page, param = "" }: Props) {
   const [collections, setCollections] = useState<any[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [errorText, setErrorText] = useState("");
+  const [detailPost, setDetailPost] = useState<Post | null>(null);
+  const [notificationPrefs, setNotificationPrefs] = useState({ likes:true, replies:true, follows:true, mentions:true, messages:true, community_activity:true });
 
   const say = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 3200); };
   const hydrate = useCallback(async () => {
@@ -158,18 +160,20 @@ export default function Platform({ page, param = "" }: Props) {
     const current = sessionData.session?.user || null; setUser(current);
     let followingNow: string[] = []; let bookmarksNow: string[] = [];
     if (current) {
-      const [pr, fr, br, nr, cr, jr] = await Promise.all([
+      const [pr, fr, br, nr, cr, jr, prefs] = await Promise.all([
         client.from("profiles").select("*").eq("id", current.id).maybeSingle(),
         client.from("follows").select("following_id").eq("follower_id", current.id),
         client.from("bookmarks").select("post_id").eq("user_id", current.id),
         client.from("notifications").select("id,kind,created_at,read_at,post_id,actor:profiles!notifications_actor_id_fkey(id,username,display_name,avatar_url)").eq("recipient_id", current.id).order("created_at", { ascending: false }).limit(50),
         client.from("creator_collections").select("id,name,description,created_at").eq("owner_id", current.id).order("created_at", { ascending: false }),
-        client.from("community_members").select("community_id").eq("user_id", current.id)
+        client.from("community_members").select("community_id").eq("user_id", current.id),
+        client.from("notification_preferences").select("likes,replies,follows,mentions,messages,community_activity").eq("user_id", current.id).maybeSingle()
       ]);
       setMe(pr.data as Profile | null);
       followingNow = (fr.data || []).map((r: any) => r.following_id); bookmarksNow = (br.data || []).map((r: any) => r.post_id);
       setFollowing(followingNow); setSavedIds(bookmarksNow); setNotifications((nr.data || []) as any);
       setCollections(cr.data || []); setJoinedCommunityIds((jr.data || []).map((r: any) => r.community_id));
+      if (prefs.data) setNotificationPrefs({ likes:prefs.data.likes, replies:prefs.data.replies, follows:prefs.data.follows, mentions:prefs.data.mentions, messages:prefs.data.messages, community_activity:prefs.data.community_activity });
     } else { setMe(null); setFollowing([]); setSavedIds([]); setNotifications([]); setCollections([]); setJoinedCommunityIds([]); }
     const [{ data: rawPosts, error: postsError }, { data: rawPeople }, { data: rawCommunities }] = await Promise.all([
       client.from("posts").select("id,author_id,content,image_url,image_urls,context_tag,context_url,created_at,profiles!posts_author_id_fkey(id,username,display_name,bio,avatar_url,cover_url,accent_color,created_at)").order("created_at", { ascending: false }).range(0, 29),
@@ -345,6 +349,11 @@ export default function Platform({ page, param = "" }: Props) {
     if (error) { say(error.message); return; }
     setReplyDraft(""); await openComments(post); await hydrate(); say("Reply posted.");
   }
+  async function saveNotificationPrefs() {
+    if(!client || !user){setAuthMode("signin");return;}
+    const {error}=await client.from("notification_preferences").upsert({user_id:user.id,...notificationPrefs,updated_at:new Date().toISOString()},{onConflict:"user_id"});
+    if(error)say(error.message);else say("Notification preferences saved to your account.");
+  }
   async function markNotificationsRead() {
     if (!client || !user) return;
     const { error } = await client.from("notifications").update({ read_at: new Date().toISOString() }).eq("recipient_id", user.id).is("read_at", null);
@@ -394,18 +403,35 @@ export default function Platform({ page, param = "" }: Props) {
       });
     }
     if (page === "community") void client.from("communities").select("*").eq("slug", param).maybeSingle().then(({ data }) => setActiveCommunity(data));
-    if (page === "post") void openComments({ id: param } as Post);
+    if (page === "post") {
+      void client.from("posts").select("id,author_id,content,image_url,image_urls,context_tag,context_url,created_at,profiles!posts_author_id_fkey(id,username,display_name,bio,avatar_url,cover_url,accent_color,created_at)").eq("id",param).maybeSingle().then(async ({data,error})=>{
+        if(error){say(error.message);return;} if(!data){setDetailPost(null);return;}
+        const row=data as any; const [{count:likes},{count:replies},{data:myLike},{data:mySave},{data:myRepost}]=await Promise.all([
+          client.from("likes").select("*",{count:"exact",head:true}).eq("post_id",param),
+          client.from("comments").select("*",{count:"exact",head:true}).eq("post_id",param),
+          user?client.from("likes").select("post_id").eq("post_id",param).eq("user_id",user.id).maybeSingle():Promise.resolve({data:null}),
+          user?client.from("bookmarks").select("post_id").eq("post_id",param).eq("user_id",user.id).maybeSingle():Promise.resolve({data:null}),
+          user?client.from("post_reposts").select("post_id").eq("post_id",param).eq("user_id",user.id).maybeSingle():Promise.resolve({data:null})
+        ]);
+        setDetailPost({...row,likes_count:likes||0,replies_count:replies||0,liked:!!myLike,saved:!!mySave,reposted:!!myRepost} as Post); void openComments(row as Post);
+      });
+    }
     if (page === "messages" && user) {
       const target = people.find(p => p.username === param);
       if (target) void openChat(target);
     }
   }, [client, page, param, user?.id, people.length]);
 
+  useEffect(() => {
+    if(page !== "edit" || !me) return;
+    setEdit({display_name:me.display_name||"",username:me.username||"",bio:me.bio||"",location:me.location||"",website:me.website||"",pronouns:me.pronouns||"",accent_color:me.accent_color||"#6558e8",avatar_url:me.avatar_url||"",cover_url:me.cover_url||""});
+  }, [page,me?.id,me?.updated_at]);
+
   const unread = notifications.filter(n => !n.read_at).length;
   const currentProfile = page === "profile" ? profileTarget : me;
   const shownPosts = page === "search" ? posts.filter(p => (p.content || "").toLowerCase().includes(query.toLowerCase()) || (p.profiles?.username || "").toLowerCase().includes(query.toLowerCase())) : allPosts;
   const matchingPeople = people.filter(p => !query || (p.username + " " + p.display_name + " " + (p.bio || "")).toLowerCase().includes(query.toLowerCase())).slice(0, 12);
-  const selectedPost = posts.find(p => p.id === param) || ({ id: param } as Post);
+  const selectedPost = detailPost?.id === param ? detailPost : posts.find(p => p.id === param) || ({ id: param } as Post);
   const title = page === "hashtag" ? "#" + param : page === "profile" ? (profileTarget?.display_name || "Profile") : page === "community" ? (activeCommunity?.name || "Topic Circle") : titleFor(page);
 
   return <div className="app-frame">
@@ -470,7 +496,7 @@ export default function Platform({ page, param = "" }: Props) {
 
       {page === "settings" && <section className="settings-layout"><aside className="settings-menu">{["Account","Privacy","Security","Appearance","Accessibility","Blocked accounts"].map(t=><button key={t} className={settingsTab===t?"active":""} onClick={()=>setSettingsTab(t)}>{t}</button>)}<a href="/notification-settings">Notification settings <ChevronRight size={15}/></a></aside><div className="settings-content"><h2>{settingsTab}</h2>{settingsTab==="Appearance" ? <><div className="setting-row"><div><b>Theme</b><small>Choose how theYapper looks on this device.</small></div><button className="outline-button" onClick={()=>setDark(!dark)}>{dark?<Sun size={16}/>:<Moon size={16}/>} {dark?"Light mode":"Dark mode"}</button></div><div className="setting-row"><div><b>Profile accent</b><small>Your profile accent is shown on your profile and avatar.</small></div><a className="outline-button" href="/edit-profile">Customize</a></div></> : settingsTab==="Account" ? <><div className="setting-row"><div><b>Profile information</b><small>Update your display name, username, bio and links.</small></div><a href="/edit-profile" className="outline-button">Edit profile</a></div><div className="setting-row"><div><b>Signed in as</b><small>{user?.email || "Not signed in"}</small></div>{user&&<button className="outline-button" onClick={async()=>{await client?.auth.signOut();setUser(null);say("Signed out.");}}><LogOut size={15}/> Sign out</button>}</div></> : settingsTab==="Privacy" ? <><div className="setting-row"><div><b>Direct messages</b><small>Only signed-in users can send messages. Conversation access is restricted by database policies.</small></div><LockKeyhole size={18}/></div><div className="setting-row"><div><b>Mentions and tags</b><small>Public mentions currently create notifications. Fine-grained mention controls require additional database preferences.</small></div><Shield size={18}/></div></> : settingsTab==="Security" ? <><div className="setting-row"><div><b>Password reset</b><small>Receive a secure password reset email.</small></div><button className="outline-button" onClick={()=>void resetPassword()}>Send reset link</button></div><div className="setting-row"><div><b>Session</b><small>Sign out on this device.</small></div><button className="outline-button" onClick={async()=>{await client?.auth.signOut();setUser(null);say("Signed out.");}}>Sign out</button></div></> : settingsTab==="Accessibility" ? <><div className="setting-row"><div><b>Reduce motion</b><small>Use the operating system preference for reduced motion.</small></div><CheckCircle2 size={18}/></div><div className="setting-row"><div><b>Keyboard and contrast</b><small>All main actions have labels and visible focus states.</small></div><CircleHelp size={18}/></div></> : <EmptyState icon={Shield} title="No blocked accounts listed" detail="Account blocking and reporting workflows need moderation controls before they can be safely enabled."/>}</div></section>}
 
-      {page === "notification-settings" && <section className="settings-content"><p className="settings-lede">Choose what deserves your attention. Notification preferences are saved to your account.</p>{["Likes","Replies","Follows","Mentions","Messages","Community activity"].map((label,i)=><div className="setting-row" key={label}><div><b>{label}</b><small>{["When someone likes your post.","When someone replies to you.","When a new person follows you.","When someone mentions your username.","When a new direct message arrives.","When a circle you joined has activity."][i]}</small></div><label className="switch"><input type="checkbox" defaultChecked/><span/></label></div>)}<button className="primary-button" onClick={()=>say("Preference storage is the next schema step; these controls are currently local to this screen.")}>Save preferences</button></section>}
+      {page === "notification-settings" && <section className="settings-content"><p className="settings-lede">Choose what deserves your attention. Preferences are saved to your account.</p>{([{key:"likes",label:"Likes",detail:"When someone likes your post."},{key:"replies",label:"Replies",detail:"When someone replies to you."},{key:"follows",label:"Follows",detail:"When a new person follows you."},{key:"mentions",label:"Mentions",detail:"When someone mentions your username."},{key:"messages",label:"Messages",detail:"When a new direct message arrives."},{key:"community_activity",label:"Community activity",detail:"When a circle you joined has activity."}] as const).map(item=><div className="setting-row" key={item.key}><div><b>{item.label}</b><small>{item.detail}</small></div><label className="switch"><input type="checkbox" checked={notificationPrefs[item.key]} onChange={e=>setNotificationPrefs(old=>({...old,[item.key]:e.target.checked}))}/><span/></label></div>)}<button className="primary-button" onClick={()=>void saveNotificationPrefs()}>Save preferences</button></section>}
 
       {page === "lists" && <><div className="section-label"><span>People you may know</span><span className="label-note">From real profiles</span></div><PeopleList people={matchingPeople} following={following} onFollow={toggleFollow} onMessage={p=>{window.location.href="/messages/"+p.username;}}/></>}
       <footer className="main-footer"><a href="/settings">Privacy</a><a href="/settings">Settings</a><span>theYapper · Better conversations</span></footer>
