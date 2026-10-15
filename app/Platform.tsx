@@ -443,9 +443,15 @@ export default function Platform({ page, param = "" }: Props) {
         setDetailPost({...row,likes_count:likes||0,replies_count:replies||0,liked:!!myLike,saved:!!mySave,reposted:!!myRepost} as Post); void openComments(row as Post);
       });
     }
-    if (page === "messages" && user) {
-      const target = people.find(p => p.username === param);
-      if (target) void openChat(target);
+    if (page === "messages" && user && param) {
+      let cancelled = false;
+      void client.from("profiles").select("id,username,display_name,avatar_url,accent_color,bio,cover_url,created_at").eq("username", param).maybeSingle().then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) { say("Could not find this conversation: " + error.message); return; }
+        if (!data) { say("That user could not be found."); return; }
+        void openChat(data as Profile);
+      });
+      return () => { cancelled = true; };
     }
   }, [client, page, param, user?.id, people.length]);
 
