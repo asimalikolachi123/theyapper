@@ -535,3 +535,66 @@ function AuthPrompt({ onSignIn }: any) { return <EmptyState icon={LockKeyhole} t
 function notificationLabel(kind: string) {
   return ({ like: "liked your post.", comment: "replied to your post.", reply: "replied to your post.", follow: "started following you.", mention: "mentioned you in a post.", repost: "reposted your post.", message: "sent you a message request." } as Record<string,string>)[kind] || "interacted with you.";
 }
+
+export function AuthPage({ mode }: { mode: "signin" | "signup" }) {
+  const client = getClient();
+  const [kind, setKind] = useState<"signin" | "signup" | "reset">(mode);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [username, setUsername] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [errorText, setErrorText] = useState("");
+  useEffect(() => {
+    if (!client) return;
+    let alive = true;
+    void client.auth.getSession().then(({ data }) => {
+      if (alive && data.session?.user) window.location.replace("/");
+    });
+    return () => { alive = false; };
+  }, [client]);
+  async function submit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault(); setErrorText(""); setNotice("");
+    if (!client) { setErrorText("Authentication is not configured. Check the Supabase public URL and publishable key in Vercel."); return; }
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail) { setErrorText("Enter your email address."); return; }
+    if (kind === "reset") {
+      setBusy(true);
+      const { error } = await client.auth.resetPasswordForEmail(cleanEmail, { redirectTo: window.location.origin + "/settings" });
+      setBusy(false);
+      if (error) setErrorText(error.message); else setNotice("If an account uses this email, a password reset link has been sent.");
+      return;
+    }
+    if (password.length < 8) { setErrorText("Use a password with at least 8 characters."); return; }
+    if (kind === "signup" && password !== confirmPassword) { setErrorText("The passwords do not match."); return; }
+    if (kind === "signup" && !/^[a-zA-Z0-9_]{3,24}$/.test(username)) { setErrorText("Username must be 3–24 letters, numbers or underscores."); return; }
+    setBusy(true);
+    try {
+      if (kind === "signup") {
+        const { data, error } = await client.auth.signUp({ email: cleanEmail, password, options: { data: { name: displayName.trim() || username, username: username.toLowerCase() }, emailRedirectTo: window.location.origin + "/" } });
+        if (error) throw error;
+        if (data.session) { window.location.replace("/"); return; }
+        setNotice("Account created. Check your inbox to confirm your email, then sign in. Check spam if needed.");
+      } else {
+        const { error } = await client.auth.signInWithPassword({ email: cleanEmail, password });
+        if (error) throw error;
+        window.location.replace("/"); return;
+      }
+    } catch (err) { setErrorText(err instanceof Error ? err.message : "Something went wrong. Please try again."); }
+    finally { setBusy(false); }
+  }
+  return <main className="auth-page"><a href="/" className="auth-page-brand"><span className="brand-symbol">y</span><span>theYapper<span className="brand-period">.</span></span></a><section className="auth-page-card"><div className="auth-page-mark"><Sparkles size={22}/></div><p className="eyebrow">{kind === "signup" ? "YOUR NEXT CONVERSATION STARTS HERE" : kind === "reset" ? "ACCOUNT RECOVERY" : "GOOD TO HAVE YOU BACK"}</p><h1>{kind === "signup" ? "Find your people." : kind === "reset" ? "Reset your password." : "Welcome back."}</h1><p className="auth-page-subtitle">{kind === "signup" ? "Make a space for your ideas, interests and real conversations." : kind === "reset" ? "We’ll email you a secure link to reset your password." : "Sign in to continue the conversations that matter to you."}</p>
+    <form className="auth-page-form" onSubmit={submit}>
+      {kind === "signup" && <><label>Display name<input required minLength={1} maxLength={60} autoComplete="name" value={displayName} onChange={e=>setDisplayName(e.target.value)} placeholder="Your name"/></label><label>Username<div className="auth-username-input"><span>@</span><input required minLength={3} maxLength={24} autoComplete="username" value={username} onChange={e=>setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g,""))} placeholder="yourhandle"/></div><small>3–24 characters · letters, numbers and underscores</small></label></>}
+      <label>Email address<input required type="email" autoComplete="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label>
+      {kind !== "reset" && <><label>Password<div className="auth-password-input"><input required type={showPassword ? "text" : "password"} minLength={8} autoComplete={kind === "signup" ? "new-password" : "current-password"} value={password} onChange={e=>setPassword(e.target.value)} placeholder="At least 8 characters"/><button type="button" onClick={()=>setShowPassword(v=>!v)}>{showPassword ? "Hide" : "Show"}</button></div></label>{kind === "signup" && <label>Confirm password<input required type={showPassword ? "text" : "password"} minLength={8} autoComplete="new-password" value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} placeholder="Enter password again"/></label>}</>}
+      {errorText && <p className="auth-error" role="alert">{errorText}</p>}{notice && <p className="auth-success" role="status">{notice}</p>}
+      <button className="primary-button auth-submit" disabled={busy}>{busy ? "Please wait…" : kind === "signup" ? "Create account" : kind === "reset" ? "Send reset link" : "Sign in"} <ChevronRight size={17}/></button>
+    </form>
+    {kind === "signin" && <button className="auth-forgot" onClick={()=>{setKind("reset");setErrorText("");setNotice("");}}>Forgot password?</button>}
+    <div className="auth-page-switch">{kind === "signup" ? "Already have an account?" : kind === "reset" ? "Remembered it?" : "New to theYapper?"} <button onClick={()=>{setKind(kind === "signup" ? "signin" : "signup");setErrorText("");setNotice("");}}>{kind === "signup" || kind === "reset" ? "Sign in" : "Create account"}</button></div>
+  </section><p className="auth-page-foot">A better place for thoughtful conversations.</p></main>;
+}
