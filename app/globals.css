@@ -28,3 +28,5 @@
 .intent-filters{display:flex;gap:7px;padding:12px 20px;overflow-x:auto;border-bottom:1px solid var(--line);scrollbar-width:thin}
 .intent-filters button{white-space:nowrap;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--muted);padding:7px 10px;font-size:10px;font-weight:700}
 .intent-filters button.active,.intent-filters button:hover{background:var(--accent2);border-color:var(--accent2);color:var(--accent)}
+
+.forgot-password{border:0;background:transparent;color:var(--accent);font-size:11px;font-weight:700;padding:3px;text-align:center}.forgot-password:disabled{opacity:.5;cursor:wait}
