@@ -13,7 +13,7 @@ create table if not exists public.profiles (
 
 create table if not exists public.posts (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references public.profiles(id) on delete cascade,
+  author_id uuid not null references public.profiles(id) on delete cascade,
   content text not null default '' check (char_length(content) <= 500),
   image_url text,
   created_at timestamptz not null default now(),
@@ -38,7 +38,7 @@ create table if not exists public.likes (
 create table if not exists public.comments (
   id uuid primary key default gen_random_uuid(),
   post_id uuid not null references public.posts(id) on delete cascade,
-  user_id uuid not null references public.profiles(id) on delete cascade,
+  author_id uuid not null references public.profiles(id) on delete cascade,
   content text not null check (char_length(content) between 1 and 1000),
   created_at timestamptz not null default now()
 );
@@ -51,7 +51,7 @@ create table if not exists public.bookmarks (
 );
 
 create index if not exists posts_created_at_idx on public.posts(created_at desc);
-create index if not exists posts_user_id_idx on public.posts(user_id);
+create index if not exists posts_author_id_idx on public.posts(author_id);
 create index if not exists comments_post_id_idx on public.comments(post_id, created_at);
 
 alter table public.profiles enable row level security;
@@ -71,11 +71,11 @@ create policy "Users can update own profile" on public.profiles for update to au
 drop policy if exists "Posts are viewable by everyone" on public.posts;
 create policy "Posts are viewable by everyone" on public.posts for select using (true);
 drop policy if exists "Users can publish own posts" on public.posts;
-create policy "Users can publish own posts" on public.posts for insert to authenticated with check (auth.uid() = user_id);
+create policy "Users can publish own posts" on public.posts for insert to authenticated with check (auth.uid() = author_id);
 drop policy if exists "Users can edit own posts" on public.posts;
-create policy "Users can edit own posts" on public.posts for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "Users can edit own posts" on public.posts for update to authenticated using (auth.uid() = author_id) with check (auth.uid() = author_id);
 drop policy if exists "Users can delete own posts" on public.posts;
-create policy "Users can delete own posts" on public.posts for delete to authenticated using (auth.uid() = user_id);
+create policy "Users can delete own posts" on public.posts for delete to authenticated using (auth.uid() = author_id);
 
 drop policy if exists "Follows are public" on public.follows;
 create policy "Follows are public" on public.follows for select using (true);
@@ -90,7 +90,7 @@ create policy "Users manage own likes" on public.likes for all to authenticated 
 drop policy if exists "Comments are public" on public.comments;
 create policy "Comments are public" on public.comments for select using (true);
 drop policy if exists "Users manage own comments" on public.comments;
-create policy "Users manage own comments" on public.comments for all to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "Users manage own comments" on public.comments for all to authenticated using (auth.uid() = author_id) with check (auth.uid() = author_id);
 
 drop policy if exists "Users view own bookmarks" on public.bookmarks;
 create policy "Users view own bookmarks" on public.bookmarks for select to authenticated using (auth.uid() = user_id);
