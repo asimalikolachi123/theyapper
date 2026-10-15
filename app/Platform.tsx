@@ -15,7 +15,7 @@ type Profile = {
   id: string; username: string; display_name: string; bio?: string | null;
   avatar_url?: string | null; cover_url?: string | null; location?: string | null;
   website?: string | null; pronouns?: string | null; accent_color?: string | null;
-  created_at?: string; followers_count?: number; following_count?: number;
+  created_at?: string; updated_at?: string; followers_count?: number; following_count?: number;
 };
 type Post = {
   id: string; author_id: string; content: string; image_url?: string | null;
