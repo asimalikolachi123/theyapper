@@ -46,7 +46,7 @@ const timeAgo = (raw: string) => {
   return new Date(raw).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 };
 const titleFor = (page: string) => ({
-  home: "Home", explore: "Explore", search: "Search", notifications: "Notifications",
+  home: "Home", explore: "Explore", reels: "Reels", search: "Search", notifications: "Notifications",
   messages: "Messages", bookmarks: "Bookmarks", profile: "Profile", edit: "Edit profile",
   hashtag: "#" + (page === "hashtag" ? "topic" : ""), post: "Conversation",
   communities: "Topic Circles", community: "Community", create: "Create post",
@@ -470,9 +470,9 @@ export default function Platform({ page, param = "" }: Props) {
     }
   }
 
-  async function openReelComments(reelId: string) {
+  async function openReelComments(reelId: string, forceRefresh = false) {
     if (!client) return;
-    if (activeCommentReelId === reelId) { setActiveCommentReelId(null); return; }
+    if (activeCommentReelId === reelId && !forceRefresh) { setActiveCommentReelId(null); return; }
     setActiveCommentReelId(reelId);
     const { data, error } = await client.from("reel_comments").select("id,reel_id,user_id,content,created_at").eq("reel_id", reelId).order("created_at", { ascending: true }).limit(100);
     if (error) { say("Could not load comments: " + error.message); return; }
@@ -490,7 +490,7 @@ export default function Platform({ page, param = "" }: Props) {
     const { error } = await client.from("reel_comments").insert({ reel_id: reelId, user_id: user.id, content });
     if (error) { setReelCommentDraft(content); say("Comment could not be posted: " + error.message); return; }
     setReels(old => old.map(r => r.id === reelId ? { ...r, comments_count: r.comments_count + 1 } : r));
-    await openReelComments(reelId);
+    await openReelComments(reelId, true);
   }
 
   const allPosts = useMemo(() => {
