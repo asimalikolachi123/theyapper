@@ -1,19 +1,17 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@supabase/supabase-js";
 import { CheckCircle2, LoaderCircle, MailCheck } from "lucide-react";
 
 export default function AuthCallbackPage() {
-  const router = useRouter();
-  const params = useSearchParams();
   const [message, setMessage] = useState("Confirming your email securely…");
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let active = true;
     async function finish() {
+      const params = new URLSearchParams(window.location.search);
       const errorDescription = params.get("error_description") || params.get("error");
       if (errorDescription) {
         if (active) { setFailed(true); setMessage(decodeURIComponent(errorDescription.replace(/\+/g, " "))); }
@@ -47,7 +45,7 @@ export default function AuthCallbackPage() {
       setMessage("Email confirmed. Welcome to theYapper!");
       const rawNext = params.get("next") || "/";
       const next = rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/";
-      window.setTimeout(() => router.replace(next), 900);
+      window.setTimeout(() => { window.location.replace(next); }, 900);
     }
     void finish().catch((err: unknown) => {
       if (!active) return;
@@ -55,7 +53,7 @@ export default function AuthCallbackPage() {
       setMessage(err instanceof Error ? err.message : "Could not confirm your email. Please try again.");
     });
     return () => { active = false; };
-  }, [params, router]);
+  }, []);
 
   return <main style={{ minHeight: "100dvh", display: "grid", placeItems: "center", padding: 24, background: "var(--background, #f8f8fb)", color: "var(--foreground, #191923)" }}>
     <section style={{ width: "100%", maxWidth: 440, padding: 32, border: "1px solid var(--border, #e7e7ee)", borderRadius: 24, background: "var(--card, #fff)", textAlign: "center", boxShadow: "0 18px 60px rgba(30,25,80,.07)" }}>
