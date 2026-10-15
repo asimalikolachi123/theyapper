@@ -531,7 +531,7 @@ function CommunityList({ rows, joined, onJoin, onOpen }: any) {
   if (!rows?.length) return <EmptyState icon={Users} title="Your first circle is waiting" detail="No Topic Circles have been created yet. Start one around a real interest and invite others to join." />;
   return <div className="community-list">{rows.map((c: any)=><article className="community-card" key={c.id}><span className="community-mark"><Users size={21}/></span><div className="community-copy"><a href={"/community/"+c.slug} onClick={e=>{if(onOpen){e.preventDefault();onOpen(c);}}}><h3>{c.name}</h3></a><span className="context-chip">{c.topic}</span><p>{c.description || "A place to share ideas and learn from one another."}</p></div><button className={"outline-button"+(joined.includes(c.id)?" joined":"")} onClick={()=>void onJoin(c)}>{joined.includes(c.id)?"Joined":"Join"}</button></article>)}</div>;
 }
-function AuthPrompt({ onSignIn }: any) { return <EmptyState icon={LockKeyhole} title="Sign in to see your activity" detail="Your notifications are private to your account." action={<button className="primary-button" onClick={onSignIn}>Sign in</button}/>; }
+function AuthPrompt({ onSignIn }: any) { return <EmptyState icon={LockKeyhole} title="Sign in to see your activity" detail="Your notifications are private to your account." action={<button className="primary-button" onClick={onSignIn}>Sign in</button>}/>; }
 function notificationLabel(kind: string) {
   return ({ like: "liked your post.", comment: "replied to your post.", reply: "replied to your post.", follow: "started following you.", mention: "mentioned you in a post.", repost: "reposted your post.", message: "sent you a message request." } as Record<string,string>)[kind] || "interacted with you.";
 }
