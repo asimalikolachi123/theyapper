@@ -6,7 +6,7 @@ import { Bell, Bookmark, Check, Compass, Feather, Heart, Home, ImagePlus, LogIn,
 
 type Profile = { id:string; username:string; display_name:string; bio?:string; avatar_url?:string|null };
 type Post = { id:string; author_id:string; name:string; handle:string; avatar:string; time:string; text:string; image?:string; likes:number; replies:number; liked:boolean; saved:boolean; verified?:boolean };
-type Notice = {id:string;kind:string;created_at:string;actor?:{username:string;display_name:string}|null;post_id?:string|null};
+type Notice = {id:string;kind:string;created_at:string;read_at?:string|null;actor?:{username:string;display_name:string}|null;post_id?:string|null};
 const url=process.env.NEXT_PUBLIC_SUPABASE_URL;
 const key=process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 let sb:SupabaseClient|null=null;
