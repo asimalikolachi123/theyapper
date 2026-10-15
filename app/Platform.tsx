@@ -91,7 +91,7 @@ function PostCard({ post, onLike, onBookmark, onRepost, onReply, onOpen }: {
         <button className={post.reposted ? "action-active" : ""} onClick={() => onRepost(post)} aria-label="Repost"><Repeat2 size={17}/><span>{post.reposted ? "Reposted" : "Repost"}</span></button>
         <button className={post.liked ? "liked" : ""} onClick={() => onLike(post)} aria-label="Like"><Heart size={17} fill={post.liked ? "currentColor" : "none"}/><span>{post.likes_count || 0}</span></button>
         <button className={post.saved ? "action-active" : ""} onClick={() => onBookmark(post)} aria-label="Bookmark"><Bookmark size={17} fill={post.saved ? "currentColor" : "none"}/></button>
-        <button onClick={() => { void navigator.clipboard?.writeText(window.location.origin + "/post/" + post.id); }} aria-label="Copy post link"><Share2 size={16}/></button>
+        <button onClick={() => { void sharePost(post); }} aria-label="Share post" title="Share post"><Share2 size={16}/></button>
       </div>
     </div>
   </article>;
@@ -234,11 +234,20 @@ export default function Platform({ page, param = "" }: Props) {
     if (refreshList) await loadChats();
   }
   async function sendMessage() {
-    if (!client || !user || !activeChat || !messageDraft.trim()) return;
-    const text = messageDraft.trim(); setMessageDraft("");
+    if (!client || !user || !activeChat || !messageDraft.trim()) { if (!user) setAuthMode("signin"); return; }
+    const text = messageDraft.trim(); if (text.length > 4000) { say("Messages can be up to 4,000 characters."); return; } setMessageDraft("");
     const { data, error } = await client.from("messages").insert({ sender_id: user.id, receiver_id: activeChat.id, content: text }).select("id,sender_id,receiver_id,content,created_at,read_at").single();
     if (error) { setMessageDraft(text); say("Message not sent: " + error.message); return; }
-    setMessages(old => old.some(m => m.id === data.id) ? old : [...old, data]); await loadChats();
+    setMessages(old => old.some(m => m.id === data.id) ? old : [...old, data]); await loadChats(); say("Message sent.");
+  }
+  async function sharePost(post: Post) {
+    const url = window.location.origin + "/post/" + post.id;
+    try {
+      if (navigator.share) { await navigator.share({ title: "theYapper conversation", url }); say("Post shared."); return; }
+      if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(url); say("Post link copied."); return; }
+      const field = document.createElement("textarea"); field.value = url; field.style.position = "fixed"; field.style.opacity = "0"; document.body.appendChild(field); field.select();
+      const copied = document.execCommand("copy"); field.remove(); if (copied) say("Post link copied."); else window.prompt("Copy this post link:", url);
+    } catch (err) { if (err instanceof Error && err.name !== "AbortError") window.prompt("Copy this post link:", url); }
   }
   async function authenticate() {
     if (!client) { say("Supabase is not configured."); return; }
@@ -259,23 +268,25 @@ export default function Platform({ page, param = "" }: Props) {
   async function toggleLike(post: Post) {
     if (!client || !user) { setAuthMode("signin"); return; }
     const was = !!post.liked;
-    setPosts(old => old.map(p => p.id === post.id ? { ...p, liked: !was, likes_count: Math.max(0, (p.likes_count || 0) + (was ? -1 : 1)) } : p));
-    const { error } = was ? await client.from("likes").delete().eq("post_id", post.id).eq("user_id", user.id) : await client.from("likes").insert({ post_id: post.id, user_id: user.id });
-    if (error) { say(error.message); await hydrate(); }
+    const updateLike = (p: Post) => p.id === post.id ? { ...p, liked: !was, likes_count: Math.max(0, (p.likes_count || 0) + (was ? -1 : 1)) } : p;
+    setPosts(old => old.map(updateLike)); setDetailPost(old => old?.id === post.id ? updateLike(old) : old);
+    const result = was ? await client.from("likes").delete().eq("post_id", post.id).eq("user_id", user.id) : await client.from("likes").upsert({ post_id: post.id, user_id: user.id }, { onConflict: "post_id,user_id", ignoreDuplicates: true });
+    if (result.error) { say("Like could not be saved: " + result.error.message); await hydrate(); } else say(was ? "Like removed." : "Post liked.");
   }
   async function toggleBookmark(post: Post) {
     if (!client || !user) { setAuthMode("signin"); return; }
     const was = savedIds.includes(post.id);
     const { error } = was ? await client.from("bookmarks").delete().eq("user_id", user.id).eq("post_id", post.id) : await client.from("bookmarks").insert({ user_id: user.id, post_id: post.id });
     if (error) { say(error.message); return; }
-    setSavedIds(old => was ? old.filter(id => id !== post.id) : [...old, post.id]); setPosts(old => old.map(p => p.id === post.id ? { ...p, saved: !was } : p));
+    setSavedIds(old => was ? old.filter(id => id !== post.id) : old.includes(post.id) ? old : [...old, post.id]);
+    setPosts(old => old.map(p => p.id === post.id ? { ...p, saved: !was } : p)); setDetailPost(old => old?.id === post.id ? { ...old, saved: !was } : old); say(was ? "Bookmark removed." : "Post bookmarked.");
   }
   async function toggleRepost(post: Post) {
     if (!client || !user) { setAuthMode("signin"); return; }
     const was = !!post.reposted;
     const { error } = was ? await client.from("post_reposts").delete().eq("post_id", post.id).eq("user_id", user.id) : await client.from("post_reposts").insert({ post_id: post.id, user_id: user.id });
-    if (error) { say(error.message); return; }
-    setPosts(old => old.map(p => p.id === post.id ? { ...p, reposted: !was } : p)); say(was ? "Repost removed." : "Reposted to your profile.");
+    if (error) { say("Repost could not be saved: " + error.message); return; }
+    setPosts(old => old.map(p => p.id === post.id ? { ...p, reposted: !was } : p)); setDetailPost(old => old?.id === post.id ? { ...old, reposted: !was } : old); say(was ? "Repost removed." : "Reposted to your profile.");
   }
   async function uploadToBucket(file: File, bucket: string, prefix: string) {
     if (!client || !user) { setAuthMode("signin"); throw new Error("Please sign in first."); }
@@ -320,9 +331,12 @@ export default function Platform({ page, param = "" }: Props) {
     if (!client || !user) { setAuthMode("signin"); return; }
     if (profile.id === user.id) return;
     const was = following.includes(profile.id);
-    const { error } = was ? await client.from("follows").delete().eq("follower_id", user.id).eq("following_id", profile.id) : await client.from("follows").insert({ follower_id: user.id, following_id: profile.id });
-    if (error) { say(error.message); return; }
-    setFollowing(old => was ? old.filter(id => id !== profile.id) : [...old, profile.id]);
+    const result = was ? await client.from("follows").delete().eq("follower_id", user.id).eq("following_id", profile.id) : await client.from("follows").upsert({ follower_id: user.id, following_id: profile.id }, { onConflict: "follower_id,following_id", ignoreDuplicates: true });
+    if (result.error) { say("Follow could not be saved: " + result.error.message); return; }
+    setFollowing(old => was ? old.filter(id => id !== profile.id) : old.includes(profile.id) ? old : [...old, profile.id]);
+    setProfileTarget(old => old?.id === profile.id ? { ...old, followers_count: Math.max(0, (old.followers_count || 0) + (was ? -1 : 1)) } : old);
+    setMe(old => old ? { ...old, following_count: Math.max(0, (old.following_count || 0) + (was ? -1 : 1)) } : old);
+    say(was ? "Unfollowed @" + profile.username : "Following @" + profile.username);
   }
   async function saveProfile() {
     if (!client || !user || !me) { say("Sign in to edit your profile."); return; }
@@ -348,7 +362,7 @@ export default function Platform({ page, param = "" }: Props) {
     if (!replyDraft.trim()) return;
     const { error } = await client.from("comments").insert({ post_id: post.id, author_id: user.id, content: replyDraft.trim() });
     if (error) { say(error.message); return; }
-    setReplyDraft(""); await openComments(post); await hydrate(); say("Reply posted.");
+    setReplyDraft(""); setDetailPost(old => old?.id === post.id ? { ...old, replies_count: (old.replies_count || 0) + 1 } : old); await openComments(post); await hydrate(); say("Reply posted.");
   }
   async function saveNotificationPrefs() {
     if(!client || !user){setAuthMode("signin");return;}
