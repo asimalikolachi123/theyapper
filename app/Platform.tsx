@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 import {
   Home, Compass, Search, Bell, MessageCircle, Bookmark, UserRound, Settings, Clapperboard,
@@ -24,7 +24,7 @@ type Post = {
   liked?: boolean; saved?: boolean; reposted?: boolean;
 };
 type Notice = { id: string; kind: string; created_at: string; read_at?: string | null; actor?: Profile | null; post_id?: string | null };
-type Reel = { id: string; user_id: string; video_url: string; caption: string; created_at: string; views_count: number; profiles?: Profile | null; likes_count: number; comments_count: number; liked: boolean };
+type Reel = { id: string; user_id: string; video_url: string; caption: string; created_at: string; views_count: number; profiles?: Profile | null; likes_count: number; comments_count: number; liked: boolean; filter_name?: string; playback_speed?: number; trim_start?: number; trim_end?: number | null; overlay_text?: string };
 type Props = { page: string; param?: string };
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -156,6 +156,14 @@ export default function Platform({ page, param = "" }: Props) {
   const [reelLoading, setReelLoading] = useState(false);
   const [reelFile, setReelFile] = useState<File | null>(null);
   const [reelCaption, setReelCaption] = useState("");
+  const [reelPreviewUrl, setReelPreviewUrl] = useState("");
+  const [reelDuration, setReelDuration] = useState(0);
+  const [reelFilter, setReelFilter] = useState("normal");
+  const [reelSpeed, setReelSpeed] = useState(1);
+  const [reelTrimStart, setReelTrimStart] = useState(0);
+  const [reelTrimEnd, setReelTrimEnd] = useState(0);
+  const [reelOverlayText, setReelOverlayText] = useState("");
+  const reelFeedRef = useRef<HTMLDivElement | null>(null);
   const [reelBusy, setReelBusy] = useState(false);
   const [activeCommentReelId, setActiveCommentReelId] = useState<string | null>(null);
   const [reelComments, setReelComments] = useState<any[]>([]);
@@ -220,6 +228,25 @@ export default function Platform({ page, param = "" }: Props) {
   useEffect(() => { void hydrate(); if (!client) return; const { data: { subscription } } = client.auth.onAuthStateChange(() => { window.setTimeout(() => void hydrate(), 0); }); return () => subscription.unsubscribe(); }, [client, hydrate]);
   useEffect(() => { try { setDark(window.localStorage.getItem("yapper-theme") === "dark"); } catch {} }, []);
   useEffect(() => { if (page === "reels") void loadReels(); }, [page, client, user?.id]);
+  useEffect(() => {
+    if (!reelFile) { setReelPreviewUrl(""); setReelDuration(0); setReelTrimStart(0); setReelTrimEnd(0); return; }
+    const url = URL.createObjectURL(reelFile); setReelPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [reelFile]);
+  useEffect(() => {
+    if (page !== "reels" || !reelFeedRef.current || !("IntersectionObserver" in window)) return;
+    const root = reelFeedRef.current;
+    const videos = Array.from(root.querySelectorAll<HTMLVideoElement>(".reel-feed-video"));
+    const observer = new IntersectionObserver(entries => entries.forEach(entry => {
+      const video = entry.target as HTMLVideoElement;
+      if (entry.isIntersecting && entry.intersectionRatio >= 0.65) {
+        videos.forEach(other => { if (other !== video) other.pause(); });
+        void video.play().catch(() => {});
+      } else video.pause();
+    }), { threshold: [0, 0.25, 0.65, 0.9] });
+    videos.forEach(video => observer.observe(video));
+    return () => { observer.disconnect(); videos.forEach(video => video.pause()); };
+  }, [page, reels.length, reelLoading]);
   useEffect(() => { if (dark) { document.documentElement.dataset.theme = "dark"; } else { delete document.documentElement.dataset.theme; } try { window.localStorage.setItem("yapper-theme", dark ? "dark" : "light"); } catch {} }, [dark]);
   useEffect(() => { if (page !== "messages" || !client || !user) return; const channel = client.channel("messages-" + user.id).on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (payload: any) => { const m = payload.new; if (m.sender_id === user.id || m.receiver_id === user.id) { setMessages(old => old.some(x => x.id === m.id) ? old : [...old, m]); void loadChats(); } }).subscribe(); return () => { void client.removeChannel(channel); }; }, [page, client, user?.id]);
 
@@ -402,7 +429,7 @@ export default function Platform({ page, param = "" }: Props) {
   async function loadReels() {
     if (!client) return;
     setReelLoading(true);
-    const { data, error } = await client.from("reels").select("id,user_id,video_url,caption,created_at,views_count").order("created_at", { ascending: false }).limit(60);
+    const { data, error } = await client.from("reels").select("id,user_id,video_url,caption,created_at,views_count,filter_name,playback_speed,trim_start,trim_end,overlay_text").order("created_at", { ascending: false }).limit(60);
     if (error) { say("Could not load Reels: " + error.message); setReelLoading(false); return; }
     const rows = data || [];
     const authorIds = Array.from(new Set(rows.map((r: any) => r.user_id)));
@@ -438,12 +465,12 @@ export default function Platform({ page, param = "" }: Props) {
     const { error: uploadError } = await client.storage.from("reel-videos").upload(path, reelFile, { contentType: reelFile.type, upsert: false });
     if (uploadError) { setReelBusy(false); say("Video upload failed: " + uploadError.message); return; }
     const videoUrl = client.storage.from("reel-videos").getPublicUrl(path).data.publicUrl;
-    const { error } = await client.from("reels").insert({ user_id: user.id, video_url: videoUrl, caption: reelCaption.trim().slice(0, 1000) });
+    const { error } = await client.from("reels").insert({ user_id: user.id, video_url: videoUrl, caption: reelCaption.trim().slice(0, 1000), filter_name: reelFilter, playback_speed: reelSpeed, trim_start: reelTrimStart, trim_end: reelTrimEnd > 0 ? reelTrimEnd : null, overlay_text: reelOverlayText.trim().slice(0, 100) });
     if (error) {
       await client.storage.from("reel-videos").remove([path]);
       setReelBusy(false); say("Reel could not be published: " + error.message); return;
     }
-    setReelFile(null); setReelCaption(""); setReelBusy(false);
+    setReelFile(null); setReelCaption(""); setReelOverlayText(""); setReelFilter("normal"); setReelSpeed(1); setReelTrimStart(0); setReelTrimEnd(0); setReelBusy(false);
     const picker = document.getElementById("reel-video-picker") as HTMLInputElement | null;
     if (picker) picker.value = "";
     say("Your Reel is live."); await loadReels();
