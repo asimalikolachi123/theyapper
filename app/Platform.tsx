@@ -171,7 +171,8 @@ export default function Platform({ page, param = "" }: Props) {
   const [activeCommentReelId, setActiveCommentReelId] = useState<string | null>(null);
   const [reelComments, setReelComments] = useState<any[]>([]);
   const [reelCommentDraft, setReelCommentDraft] = useState("");
-  const [viewedReelIds, setViewedReelIds] = useState<string[]>([]);\n  const [reelMuted, setReelMuted] = useState(true);\n  const [pausedReelId, setPausedReelId] = useState<string | null>(null);\n  const [activeReelPlaybackId, setActiveReelPlaybackId] = useState<string | null>(null);\n  const [reelPlaybackTime, setReelPlaybackTime] = useState(0);\n  const [reelPlaybackDuration, setReelPlaybackDuration] = useState(0);
+  const [viewedReelIds, setViewedReelIds] = useState<string[]>([]);
+  const [reelMuted, setReelMuted] = useState(true);\n  const [pausedReelId, setPausedReelId] = useState<string | null>(null);\n  const [activeReelPlaybackId, setActiveReelPlaybackId] = useState<string | null>(null);\n  const [reelPlaybackTime, setReelPlaybackTime] = useState(0);\n  const [reelPlaybackDuration, setReelPlaybackDuration] = useState(0);
   const [notificationPrefs, setNotificationPrefs] = useState({ likes:true, replies:true, follows:true, mentions:true, messages:true, community_activity:true });
 
   const say = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 3200); };
