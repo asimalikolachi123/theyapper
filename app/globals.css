@@ -65,3 +65,27 @@
  .reel-side-actions{right:9px;bottom:82px;gap:16px}
 }
 @media(prefers-reduced-motion:reduce){.reel-full-shell{scroll-behavior:auto}}
+
+
+/* Reels editor: clip sequence and music source controls */
+.reel-extra-picker,
+.reel-music-picker { margin-top: 10px; }
+.reel-extra-list {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  margin: 10px 0;
+  border: 1px solid var(--border, #30323a);
+  border-radius: 12px;
+  background: var(--surface, rgba(128,128,128,.06));
+}
+.reel-extra-list > div { display:flex; align-items:center; justify-content:space-between; gap:12px; min-width:0; }
+.reel-extra-list > div span { overflow-wrap:anywhere; font-size:13px; }
+.reel-extra-list button { border:0; background:transparent; color:var(--danger, #e05252); cursor:pointer; padding:6px 8px; }
+.reel-extra-list small { opacity:.7; font-size:12px; }
+.reel-upload-footer small { line-height:1.55; }
+@media (max-width: 640px) {
+  .reel-upload-footer { align-items:stretch; flex-direction:column; gap:12px; }
+  .reel-upload-footer .primary-button { width:100%; justify-content:center; min-height:44px; }
+  .reel-extra-list { padding:10px; }
+}
