@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 import {
-  Home, Compass, Search, Bell, MessageCircle, Bookmark, UserRound, Settings, Clapperboard,
+  Home, Compass, Search, Bell, MessageCircle, Bookmark, UserRound, Settings, Clapperboard, Music,
   Plus, ImagePlus, Heart, Repeat2, MessageSquare, Share2, MoreHorizontal,
   Sun, Moon, Send, ArrowLeft, Check, X, Sparkles, Users, Hash, Link2,
   Camera, LockKeyhole, Shield, SlidersHorizontal, LogOut, ChevronRight,
