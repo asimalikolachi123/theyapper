@@ -155,6 +155,9 @@ export default function Platform({ page, param = "" }: Props) {
   const [reels, setReels] = useState<Reel[]>([]);
   const [reelLoading, setReelLoading] = useState(false);
   const [reelFile, setReelFile] = useState<File | null>(null);
+  const [reelExtraFiles, setReelExtraFiles] = useState<File[]>([]);
+  const [reelMusicFile, setReelMusicFile] = useState<File | null>(null);
+  const [reelExportProgress, setReelExportProgress] = useState(0);
   const [reelCaption, setReelCaption] = useState("");
   const [reelPreviewUrl, setReelPreviewUrl] = useState("");
   const [reelDuration, setReelDuration] = useState(0);
@@ -454,10 +457,97 @@ export default function Platform({ page, param = "" }: Props) {
     setReelLoading(false);
   }
 
+  async function renderEditedReel(): Promise<File> {
+    if (!reelFile) throw new Error("Choose a video first.");
+    const clips = [reelFile, ...reelExtraFiles];
+    if (clips.some(file => file.size > 50 * 1024 * 1024)) throw new Error("Each clip must be 50 MB or smaller.");
+    if (!("MediaRecorder" in window) || !HTMLCanvasElement.prototype.captureStream) throw new Error("Video export is not supported by this browser. Try the latest Chrome.");
+    const canvas = document.createElement("canvas"); canvas.width = 720; canvas.height = 1280;
+    const ctx = canvas.getContext("2d"); if (!ctx) throw new Error("Could not start video editor.");
+    const canvasStream = canvas.captureStream(30);
+    const audioContext = new AudioContext();
+    const audioOut = audioContext.createMediaStreamDestination();
+    const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus") ? "video/webm;codecs=vp9,opus" : "video/webm";
+    const recorder = new MediaRecorder(new MediaStream([...canvasStream.getVideoTracks(), ...audioOut.stream.getAudioTracks()]), { mimeType: mime });
+    const chunks: BlobPart[] = [];
+    recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+    const done = new Promise<Blob>((resolve, reject) => {
+      recorder.onstop = () => resolve(new Blob(chunks, { type: "video/webm" }));
+      recorder.onerror = () => reject(new Error("Video export failed. Please try a shorter clip."));
+    });
+    const musicUrl = reelMusicFile ? URL.createObjectURL(reelMusicFile) : "";
+    let music: HTMLAudioElement | null = null;
+    let musicSource: MediaElementAudioSourceNode | null = null;
+    if (musicUrl) {
+      music = new Audio(musicUrl); music.loop = true; music.preload = "auto";
+      musicSource = audioContext.createMediaElementSource(music);
+      musicSource.connect(audioOut); musicSource.connect(audioContext.destination);
+    }
+    const filterMap: Record<string,string> = { normal:"none", warm:"sepia(.28) saturate(1.25)", mono:"grayscale(1)", vivid:"saturate(1.7) contrast(1.08)", fade:"saturate(.7) contrast(.88) brightness(1.08)", cool:"hue-rotate(12deg) saturate(1.1)" };
+    let stopped = false;
+    const draw = () => {
+      if (stopped) return;
+      ctx.fillStyle = "#08090c"; ctx.fillRect(0,0,canvas.width,canvas.height);
+      const active = document.querySelector<HTMLVideoElement>("video[data-reel-export-active='true']");
+      if (active && active.readyState >= 2) {
+        ctx.save(); ctx.filter = filterMap[reelFilter] || "none";
+        const scale = Math.min(canvas.width / active.videoWidth, canvas.height / active.videoHeight);
+        const w = active.videoWidth * scale, h = active.videoHeight * scale;
+        ctx.drawImage(active, (canvas.width-w)/2, (canvas.height-h)/2, w, h); ctx.restore();
+        if (reelOverlayText.trim()) {
+          ctx.save(); ctx.font = "bold 54px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.lineWidth = 5; ctx.strokeStyle = "rgba(0,0,0,.8)"; ctx.fillStyle = "white";
+          const words = reelOverlayText.trim().split(/\s+/); const lines: string[] = []; let line = "";
+          for (const word of words) { const test = line ? line + " " + word : word; if (ctx.measureText(test).width > 620 && line) { lines.push(line); line = word; } else line = test; }
+          if (line) lines.push(line);
+          const top = canvas.height * .4 - (lines.length-1)*32;
+          lines.slice(0,3).forEach((value,index)=>{ctx.strokeText(value,canvas.width/2,top+index*66);ctx.fillText(value,canvas.width/2,top+index*66);}); ctx.restore();
+        }
+      }
+      requestAnimationFrame(draw);
+    };
+    const playVideo = async (file: File, index: number) => new Promise<void>(async (resolve,reject) => {
+      const url = URL.createObjectURL(file); const video = document.createElement("video");
+      video.preload = "auto"; video.playsInline = true; video.src = url; video.dataset.reelExportActive = "true";
+      video.style.position = "fixed"; video.style.left = "-10000px"; document.body.appendChild(video);
+      let source: MediaElementAudioSourceNode | null = null;
+      try {
+        await new Promise<void>((ok,fail)=>{video.onloadedmetadata=()=>ok();video.onerror=()=>fail(new Error("Could not read clip: "+file.name));});
+        source = audioContext.createMediaElementSource(video); source.connect(audioOut); source.connect(audioContext.destination);
+        const start = index === 0 ? Math.min(reelTrimStart, Math.max(0,video.duration-.1)) : 0;
+        const end = index === 0 && reelTrimEnd > start ? Math.min(reelTrimEnd,video.duration) : video.duration;
+        video.currentTime = start; video.playbackRate = reelSpeed;
+        video.onended = finish;
+        function finish(){ video.pause(); video.removeAttribute("data-reel-export-active"); source?.disconnect(); video.remove(); URL.revokeObjectURL(url); resolve(); }
+        video.ontimeupdate = () => { if (video.currentTime >= end) finish(); };
+        await video.play();
+        setReelExportProgress(Math.round((index/clips.length)*100));
+      } catch(error) { source?.disconnect(); video.remove(); URL.revokeObjectURL(url); reject(error); }
+    });
+    try {
+      await audioContext.resume();
+      if (music) { await music.play().catch(()=>{}); }
+      recorder.start(250); draw();
+      for (let i=0;i<clips.length;i++) await playVideo(clips[i],i);
+      stopped = true;
+      if (music) music.pause();
+      recorder.stop();
+      const blob = await done;
+      if (!blob.size) throw new Error("Export produced an empty video. Please try again.");
+      return new File([blob], "theyapper-edited-reel.webm", { type: "video/webm", lastModified: Date.now() });
+    } finally {
+      stopped = true; if (recorder.state !== "inactive") recorder.stop();
+      canvasStream.getTracks().forEach(track=>track.stop()); audioOut.stream.getTracks().forEach(track=>track.stop());
+      if (musicSource) musicSource.disconnect(); if (music) music.pause();
+      if (musicUrl) URL.revokeObjectURL(musicUrl);
+      await audioContext.close().catch(()=>{}); setReelExportProgress(0);
+    }
+  }
+
   async function publishReel() {
     if (!client || !user) { setAuthMode("signin"); say("Sign in to upload a Reel."); return; }
     if (!reelFile) { say("Choose a video first."); return; }
-    if (reelFile.size > 50 * 1024 * 1024) { say("Reels must be 50 MB or smaller."); return; }
+    if (reelFile.size > 50 * 1024 * 1024 || reelExtraFiles.some(file => file.size > 50 * 1024 * 1024)) { say("Each clip must be 50 MB or smaller."); return; }
     if (!["video/mp4", "video/webm", "video/quicktime"].includes(reelFile.type)) { say("Choose an MP4, WebM or MOV video."); return; }
     setReelBusy(true);
     const extension = reelFile.name.split(".").pop()?.toLowerCase() || "mp4";
@@ -465,12 +555,12 @@ export default function Platform({ page, param = "" }: Props) {
     const { error: uploadError } = await client.storage.from("reel-videos").upload(path, reelFile, { contentType: reelFile.type, upsert: false });
     if (uploadError) { setReelBusy(false); say("Video upload failed: " + uploadError.message); return; }
     const videoUrl = client.storage.from("reel-videos").getPublicUrl(path).data.publicUrl;
-    const { error } = await client.from("reels").insert({ user_id: user.id, video_url: videoUrl, caption: reelCaption.trim().slice(0, 1000), filter_name: reelFilter, playback_speed: reelSpeed, trim_start: reelTrimStart, trim_end: reelTrimEnd > 0 ? reelTrimEnd : null, overlay_text: reelOverlayText.trim().slice(0, 100) });
+    const { error } = await client.from("reels").insert({ user_id: user.id, video_url: videoUrl, caption: reelCaption.trim().slice(0, 1000), filter_name: "normal", playback_speed: 1, trim_start: 0, trim_end: null, overlay_text: reelOverlayText.trim().slice(0, 100) });
     if (error) {
       await client.storage.from("reel-videos").remove([path]);
       setReelBusy(false); say("Reel could not be published: " + error.message); return;
     }
-    setReelFile(null); setReelCaption(""); setReelOverlayText(""); setReelFilter("normal"); setReelSpeed(1); setReelTrimStart(0); setReelTrimEnd(0); setReelBusy(false);
+    setReelFile(null); setReelExtraFiles([]); setReelMusicFile(null); setReelCaption(""); setReelOverlayText(""); setReelFilter("normal"); setReelSpeed(1); setReelTrimStart(0); setReelTrimEnd(0); setReelBusy(false);
     const picker = document.getElementById("reel-video-picker") as HTMLInputElement | null;
     if (picker) picker.value = "";
     say("Your Reel is live."); await loadReels();
