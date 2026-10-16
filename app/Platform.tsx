@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 import {
   Home, Compass, Search, Bell, MessageCircle, Bookmark, UserRound, Settings, Clapperboard,
@@ -24,7 +24,7 @@ type Post = {
   liked?: boolean; saved?: boolean; reposted?: boolean;
 };
 type Notice = { id: string; kind: string; created_at: string; read_at?: string | null; actor?: Profile | null; post_id?: string | null };
-type Reel = { id: string; user_id: string; video_url: string; caption: string; created_at: string; views_count: number; profiles?: Profile | null; likes_count: number; comments_count: number; liked: boolean };
+type Reel = { id: string; user_id: string; video_url: string; caption: string; created_at: string; views_count: number; profiles?: Profile | null; likes_count: number; comments_count: number; liked: boolean; filter_name?: string; playback_speed?: number; trim_start?: number; trim_end?: number | null; overlay_text?: string };
 type Props = { page: string; param?: string };
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -156,6 +156,14 @@ export default function Platform({ page, param = "" }: Props) {
   const [reelLoading, setReelLoading] = useState(false);
   const [reelFile, setReelFile] = useState<File | null>(null);
   const [reelCaption, setReelCaption] = useState("");
+  const [reelPreviewUrl, setReelPreviewUrl] = useState("");
+  const [reelDuration, setReelDuration] = useState(0);
+  const [reelFilter, setReelFilter] = useState("normal");
+  const [reelSpeed, setReelSpeed] = useState(1);
+  const [reelTrimStart, setReelTrimStart] = useState(0);
+  const [reelTrimEnd, setReelTrimEnd] = useState(0);
+  const [reelOverlayText, setReelOverlayText] = useState("");
+  const reelFeedRef = useRef<HTMLDivElement | null>(null);
   const [reelBusy, setReelBusy] = useState(false);
   const [activeCommentReelId, setActiveCommentReelId] = useState<string | null>(null);
   const [reelComments, setReelComments] = useState<any[]>([]);
@@ -220,6 +228,25 @@ export default function Platform({ page, param = "" }: Props) {
   useEffect(() => { void hydrate(); if (!client) return; const { data: { subscription } } = client.auth.onAuthStateChange(() => { window.setTimeout(() => void hydrate(), 0); }); return () => subscription.unsubscribe(); }, [client, hydrate]);
   useEffect(() => { try { setDark(window.localStorage.getItem("yapper-theme") === "dark"); } catch {} }, []);
   useEffect(() => { if (page === "reels") void loadReels(); }, [page, client, user?.id]);
+  useEffect(() => {
+    if (!reelFile) { setReelPreviewUrl(""); setReelDuration(0); setReelTrimStart(0); setReelTrimEnd(0); return; }
+    const url = URL.createObjectURL(reelFile); setReelPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [reelFile]);
+  useEffect(() => {
+    if (page !== "reels" || !reelFeedRef.current || !("IntersectionObserver" in window)) return;
+    const root = reelFeedRef.current;
+    const videos = Array.from(root.querySelectorAll<HTMLVideoElement>(".reel-feed-video"));
+    const observer = new IntersectionObserver(entries => entries.forEach(entry => {
+      const video = entry.target as HTMLVideoElement;
+      if (entry.isIntersecting && entry.intersectionRatio >= 0.65) {
+        videos.forEach(other => { if (other !== video) other.pause(); });
+        void video.play().catch(() => {});
+      } else video.pause();
+    }), { threshold: [0, 0.25, 0.65, 0.9] });
+    videos.forEach(video => observer.observe(video));
+    return () => { observer.disconnect(); videos.forEach(video => video.pause()); };
+  }, [page, reels.length, reelLoading]);
   useEffect(() => { if (dark) { document.documentElement.dataset.theme = "dark"; } else { delete document.documentElement.dataset.theme; } try { window.localStorage.setItem("yapper-theme", dark ? "dark" : "light"); } catch {} }, [dark]);
   useEffect(() => { if (page !== "messages" || !client || !user) return; const channel = client.channel("messages-" + user.id).on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (payload: any) => { const m = payload.new; if (m.sender_id === user.id || m.receiver_id === user.id) { setMessages(old => old.some(x => x.id === m.id) ? old : [...old, m]); void loadChats(); } }).subscribe(); return () => { void client.removeChannel(channel); }; }, [page, client, user?.id]);
 
@@ -402,7 +429,7 @@ export default function Platform({ page, param = "" }: Props) {
   async function loadReels() {
     if (!client) return;
     setReelLoading(true);
-    const { data, error } = await client.from("reels").select("id,user_id,video_url,caption,created_at,views_count").order("created_at", { ascending: false }).limit(60);
+    const { data, error } = await client.from("reels").select("id,user_id,video_url,caption,created_at,views_count,filter_name,playback_speed,trim_start,trim_end,overlay_text").order("created_at", { ascending: false }).limit(60);
     if (error) { say("Could not load Reels: " + error.message); setReelLoading(false); return; }
     const rows = data || [];
     const authorIds = Array.from(new Set(rows.map((r: any) => r.user_id)));
@@ -438,12 +465,12 @@ export default function Platform({ page, param = "" }: Props) {
     const { error: uploadError } = await client.storage.from("reel-videos").upload(path, reelFile, { contentType: reelFile.type, upsert: false });
     if (uploadError) { setReelBusy(false); say("Video upload failed: " + uploadError.message); return; }
     const videoUrl = client.storage.from("reel-videos").getPublicUrl(path).data.publicUrl;
-    const { error } = await client.from("reels").insert({ user_id: user.id, video_url: videoUrl, caption: reelCaption.trim().slice(0, 1000) });
+    const { error } = await client.from("reels").insert({ user_id: user.id, video_url: videoUrl, caption: reelCaption.trim().slice(0, 1000), filter_name: reelFilter, playback_speed: reelSpeed, trim_start: reelTrimStart, trim_end: reelTrimEnd > 0 ? reelTrimEnd : null, overlay_text: reelOverlayText.trim().slice(0, 100) });
     if (error) {
       await client.storage.from("reel-videos").remove([path]);
       setReelBusy(false); say("Reel could not be published: " + error.message); return;
     }
-    setReelFile(null); setReelCaption(""); setReelBusy(false);
+    setReelFile(null); setReelCaption(""); setReelOverlayText(""); setReelFilter("normal"); setReelSpeed(1); setReelTrimStart(0); setReelTrimEnd(0); setReelBusy(false);
     const picker = document.getElementById("reel-video-picker") as HTMLInputElement | null;
     if (picker) picker.value = "";
     say("Your Reel is live."); await loadReels();
@@ -600,22 +627,29 @@ export default function Platform({ page, param = "" }: Props) {
       </header>
 
 
-      {page === "reels" && <section className="reels-page">
-        <div className="reels-intro"><div><span className="eyebrow"><Clapperboard size={14}/> SHORT VIDEOS</span><h2>Reels, made by your community.</h2><p>Discover creators, ideas and moments — one swipe at a time.</p></div></div>
-        <section className="reel-upload-panel">
-          <div className="reel-upload-heading"><div className="reel-upload-icon"><Upload size={19}/></div><div><b>Share a Reel</b><small>MP4, WebM or MOV · up to 50 MB</small></div></div>
-          <label className="reel-file-picker"><Clapperboard size={18}/><span>{reelFile ? reelFile.name : "Choose a video"}</span><input id="reel-video-picker" type="file" accept="video/mp4,video/webm,video/quicktime" onChange={e => setReelFile(e.target.files?.[0] || null)}/></label>
-          <textarea value={reelCaption} onChange={e => setReelCaption(e.target.value.slice(0,1000))} maxLength={1000} placeholder="Write a caption for your Reel…" aria-label="Reel caption"/>
-          <div className="reel-upload-footer"><small>{reelCaption.length}/1000</small><button className="primary-button" disabled={reelBusy || !reelFile} onClick={() => void publishReel()}>{reelBusy ? <LoaderCircle size={16} className="spin"/> : <Upload size={16}/>} {reelBusy ? "Uploading…" : "Publish Reel"}</button></div>
-        </section>
-        <div className="reels-feed-heading"><h3>Explore Reels</h3><span>{reels.length} {reels.length === 1 ? "video" : "videos"}</span></div>
-        {reelLoading ? <div className="loading-stack"><div className="skeleton-post"/></div> : !reels.length ? <EmptyState icon={Clapperboard} title="Your Reels feed starts here" detail="Be the first to share a short video with the theYapper community."/> : <div className="reels-feed">{reels.map(reel => <article className="reel-card" key={reel.id}>
-          <div className="reel-video-shell"><video className="reel-video" src={reel.video_url} controls playsInline muted preload="metadata" onPlay={e => { document.querySelectorAll(".reel-video").forEach(v => { if (v !== e.currentTarget) (v as HTMLVideoElement).pause(); }); void recordReelView(reel.id); }} />
-            <div className="reel-overlay-top"><a href={reel.profiles ? "/u/" + reel.profiles.username : "#"} className="reel-creator"><Avatar profile={reel.profiles} size="sm"/><span><b>{reel.profiles?.display_name || "theYapper creator"}</b><small>@{reel.profiles?.username || "creator"} · {timeAgo(reel.created_at)}</small></span></a><button className="reel-share-button" aria-label="Share Reel" onClick={async () => { const url = window.location.origin + "/reels"; try { if (navigator.share) await navigator.share({ title: "theYapper Reel", url }); else { await navigator.clipboard.writeText(url); say("Reels link copied."); } } catch (err) { if (err instanceof Error && err.name !== "AbortError") say("Could not share this Reel."); } }}><Share2 size={17}/></button></div>
-            {reel.caption && <div className="reel-caption-overlay"><p>{reel.caption}</p></div>}
+      {page === "reels" && <section className="reels-page reels-immersive">
+        <div className="reels-intro reels-intro-immersive"><div><span className="eyebrow"><Clapperboard size={14}/> YAPPER REELS</span><h2>Swipe. Watch. Create.</h2><p>Full-screen videos from your community.</p></div></div>
+        <details className="reel-create-details">
+          <summary><span className="reel-upload-icon"><Upload size={18}/></span><span><b>Create a Reel</b><small>Trim · filters · speed · text overlay</small></span><Plus size={18}/></summary>
+          <section className="reel-upload-panel reel-editor-panel">
+            <label className="reel-file-picker"><Clapperboard size={18}/><span>{reelFile ? reelFile.name : "Choose a video to edit"}</span><input id="reel-video-picker" type="file" accept="video/mp4,video/webm,video/quicktime" onChange={e=>{const file=e.target.files?.[0]||null;if(file&&file.size>50*1024*1024){say("Video must be 50 MB or smaller.");e.target.value="";return;}if(file&&!["video/mp4","video/webm","video/quicktime"].includes(file.type)){say("Choose MP4, WebM or MOV.");e.target.value="";return;}setReelFile(file);}}/></label>
+            {reelPreviewUrl && <div className="reel-editor-preview-wrap"><video id="reel-editor-preview" className="reel-editor-preview" src={reelPreviewUrl} controls playsInline onLoadedMetadata={e=>{const d=e.currentTarget.duration;if(Number.isFinite(d)){setReelDuration(d);setReelTrimEnd(old=>old>0?Math.min(old,d):d);}}} style={{filter:({normal:"none",warm:"sepia(.28) saturate(1.25)",mono:"grayscale(1)",vivid:"saturate(1.7) contrast(1.08)",fade:"saturate(.7) contrast(.88) brightness(1.08)",cool:"hue-rotate(12deg) saturate(1.1)"} as Record<string,string>)[reelFilter]}}/><span className="reel-editor-preview-label">LIVE PREVIEW</span></div>}
+            <label className="reel-editor-label">Caption <textarea value={reelCaption} onChange={e=>setReelCaption(e.target.value.slice(0,1000))} maxLength={1000} placeholder="Write a caption…"/></label>
+            <label className="reel-editor-label">Text on video <input value={reelOverlayText} onChange={e=>setReelOverlayText(e.target.value.slice(0,100))} maxLength={100} placeholder="Add a title or short text"/></label>
+            <div className="reel-editor-controls"><label>Filter<select value={reelFilter} onChange={e=>setReelFilter(e.target.value)}><option value="normal">Original</option><option value="warm">Warm</option><option value="mono">Black & white</option><option value="vivid">Vivid</option><option value="fade">Soft / Fade</option><option value="cool">Cool</option></select></label><label>Playback speed<select value={reelSpeed} onChange={e=>setReelSpeed(Number(e.target.value))}>{[0.5,0.75,1,1.25,1.5,2].map(v=><option key={v} value={v}>{v}×</option>)}</select></label></div>
+            {reelPreviewUrl&&reelDuration>0&&<div className="reel-trim-controls"><b>Trim video</b><small>Choose start/end points · {reelDuration.toFixed(1)} sec total</small><label>Start · {reelTrimStart.toFixed(1)}s<input type="range" min="0" max={Math.max(0,reelDuration-0.5)} step="0.1" value={Math.min(reelTrimStart,Math.max(0,reelDuration-0.5))} onChange={e=>{const v=Number(e.target.value);setReelTrimStart(v);const el=document.getElementById("reel-editor-preview") as HTMLVideoElement|null;if(el)el.currentTime=v;if(reelTrimEnd>0&&v>=reelTrimEnd)setReelTrimEnd(Math.min(reelDuration,v+0.5));}}/></label><label>End · {(reelTrimEnd||reelDuration).toFixed(1)}s<input type="range" min={Math.min(reelDuration,reelTrimStart+0.5)} max={reelDuration} step="0.1" value={Math.min(reelDuration,Math.max(reelTrimStart+0.5,reelTrimEnd||reelDuration))} onChange={e=>setReelTrimEnd(Number(e.target.value))}/></label></div>}
+            <div className="reel-upload-footer"><small>{reelCaption.length}/1000 · Max 50 MB</small><button className="primary-button" disabled={reelBusy||!reelFile} onClick={()=>void publishReel()}>{reelBusy?<LoaderCircle size={16} className="spin"/>:<Upload size={16}/>} {reelBusy?"Uploading…":"Publish Reel"}</button></div>
+          </section>
+        </details>
+        <div className="reels-feed-heading"><h3>For you</h3><span>{reels.length} videos</span></div>
+        {reelLoading?<div className="loading-stack"><div className="skeleton-post"/></div>:!reels.length?<EmptyState icon={Clapperboard} title="Your Reels feed starts here" detail="Be the first to share a short video with the theYapper community."/>:<div className="reels-feed reels-snap-feed" ref={reelFeedRef}>{reels.map(reel=><article className="reel-card reel-full-card" key={reel.id}>
+          <div className="reel-video-shell reel-full-shell"><video className={"reel-video reel-feed-video filter-"+(reel.filter_name||"normal")} src={reel.video_url} playsInline muted loop preload="metadata" controls={false} style={{filter:({normal:"none",warm:"sepia(.28) saturate(1.25)",mono:"grayscale(1)",vivid:"saturate(1.7) contrast(1.08)",fade:"saturate(.7) contrast(.88) brightness(1.08)",cool:"hue-rotate(12deg) saturate(1.1)"} as Record<string,string>)[reel.filter_name||"normal"]}} onClick={e=>{const v=e.currentTarget;if(v.paused)void v.play().catch(()=>{});else v.pause();}} onLoadedMetadata={e=>{const v=e.currentTarget;v.playbackRate=reel.playback_speed||1;const begin=reel.trim_start||0;if(begin>0&&v.currentTime<begin)v.currentTime=begin;}} onTimeUpdate={e=>{const v=e.currentTarget;const stop=reel.trim_end||v.duration;if(Number.isFinite(stop)&&stop>0&&v.currentTime>=stop){v.currentTime=reel.trim_start||0;void v.play().catch(()=>{});}}} onPlay={()=>void recordReelView(reel.id)}/>
+            <div className="reel-overlay-top reel-overlay-top-immersive"><a href={reel.profiles?"/u/"+reel.profiles.username:"#"} className="reel-creator"><Avatar profile={reel.profiles} size="sm"/><span><b>{reel.profiles?.display_name||"theYapper creator"}</b><small>@{reel.profiles?.username||"creator"} · {timeAgo(reel.created_at)}</small></span></a><button className="reel-share-button" aria-label="Share Reel" onClick={async()=>{const url=window.location.origin+"/reels";try{if(navigator.share)await navigator.share({title:"theYapper Reel",url});else{await navigator.clipboard.writeText(url);say("Reels link copied.");}}catch(err){if(err instanceof Error&&err.name!=="AbortError")say("Could not share this Reel.");}}}><Share2 size={17}/></button></div>
+            {reel.overlay_text&&<div className="reel-text-overlay">{reel.overlay_text}</div>}
+            <div className="reel-caption-overlay reel-caption-immersive"><p>{reel.caption}</p><small>{(reel.playback_speed||1)!==1?"Edited · "+(reel.playback_speed||1)+"× speed":"Original audio"}</small></div>
+            <div className="reel-side-actions"><button className={reel.liked?"liked":""} onClick={()=>void toggleReelLike(reel)} aria-label="Like Reel"><Heart size={25} fill={reel.liked?"currentColor":"none"}/><span>{reel.likes_count}</span></button><button onClick={()=>void openReelComments(reel.id)} aria-label="Comments"><MessageCircle size={24}/><span>{reel.comments_count}</span></button><button onClick={async()=>{const url=window.location.origin+"/reels";try{if(navigator.share)await navigator.share({title:"theYapper Reel",url});else{await navigator.clipboard.writeText(url);say("Reels link copied.");}}catch{}}} aria-label="Share Reel"><Share2 size={23}/><span>Share</span></button><a href={reel.profiles?"/u/"+reel.profiles.username:"/reels"} aria-label="Creator profile"><Avatar profile={reel.profiles} size="sm"/><span>Profile</span></a></div>
           </div>
-          <div className="reel-actions"><button className={reel.liked ? "reel-action liked" : "reel-action"} onClick={() => void toggleReelLike(reel)} aria-label="Like Reel"><Heart size={19} fill={reel.liked ? "currentColor" : "none"}/><span>{reel.likes_count}</span></button><button className="reel-action" onClick={() => void openReelComments(reel.id)} aria-label="Comments"><MessageCircle size={19}/><span>{reel.comments_count}</span></button><span className="reel-action reel-views"><Globe size={17}/><span>{reel.views_count || 0} views</span></span><a className="reel-action" href={reel.profiles ? "/u/" + reel.profiles.username : "/reels"} aria-label="View creator"><UserRound size={18}/><span>Creator</span></a></div>
-          {activeCommentReelId === reel.id && <section className="reel-comments"><h4>Comments</h4>{reelComments.length ? reelComments.map(c => <div className="reel-comment" key={c.id}><Avatar profile={c.profiles} size="sm"/><div><b>{c.profiles?.display_name || "Yapper"} <small>@{c.profiles?.username || "user"}</small></b><p>{c.content}</p><time>{timeAgo(c.created_at)} ago</time></div></div>) : <p className="muted-note">No comments yet. Start the conversation.</p>}<form onSubmit={e => { e.preventDefault(); void sendReelComment(reel.id); }}><input value={reelCommentDraft} onChange={e => setReelCommentDraft(e.target.value.slice(0,500))} placeholder="Write a comment…" aria-label="Reel comment" maxLength={500}/><button className="primary-button" disabled={!reelCommentDraft.trim()}><Send size={15}/> Send</button></form></section>}
+          {activeCommentReelId===reel.id&&<section className="reel-comments"><h4>Comments</h4>{reelComments.length?reelComments.map(c=><div className="reel-comment" key={c.id}><Avatar profile={c.profiles} size="sm"/><div><b>{c.profiles?.display_name||"Yapper"} <small>@{c.profiles?.username||"user"}</small></b><p>{c.content}</p><time>{timeAgo(c.created_at)} ago</time></div></div>):<p className="muted-note">No comments yet. Start the conversation.</p>}<form onSubmit={e=>{e.preventDefault();void sendReelComment(reel.id);}}><input value={reelCommentDraft} onChange={e=>setReelCommentDraft(e.target.value.slice(0,500))} placeholder="Write a comment…" aria-label="Reel comment" maxLength={500}/><button className="primary-button" disabled={!reelCommentDraft.trim()}><Send size={15}/> Send</button></form></section>}
         </article>)}</div>}
       </section>}
 
