@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 import {
-  Home, Compass, Search, Bell, MessageCircle, Bookmark, UserRound, Settings, Clapperboard,
+  Home, Compass, Search, Bell, MessageCircle, Bookmark, UserRound, Settings, Clapperboard, Music,
   Plus, ImagePlus, Heart, Repeat2, MessageSquare, Share2, MoreHorizontal,
   Sun, Moon, Send, ArrowLeft, Check, X, Sparkles, Users, Hash, Link2,
   Camera, LockKeyhole, Shield, SlidersHorizontal, LogOut, ChevronRight,
@@ -155,6 +155,9 @@ export default function Platform({ page, param = "" }: Props) {
   const [reels, setReels] = useState<Reel[]>([]);
   const [reelLoading, setReelLoading] = useState(false);
   const [reelFile, setReelFile] = useState<File | null>(null);
+  const [reelExtraFiles, setReelExtraFiles] = useState<File[]>([]);
+  const [reelMusicFile, setReelMusicFile] = useState<File | null>(null);
+  const [reelExportProgress, setReelExportProgress] = useState(0);
   const [reelCaption, setReelCaption] = useState("");
   const [reelPreviewUrl, setReelPreviewUrl] = useState("");
   const [reelDuration, setReelDuration] = useState(0);
@@ -454,10 +457,98 @@ export default function Platform({ page, param = "" }: Props) {
     setReelLoading(false);
   }
 
+  async function renderEditedReel(): Promise<File> {
+    if (!reelFile) throw new Error("Choose a video first.");
+    const clips = [reelFile, ...reelExtraFiles];
+    if (clips.some(file => file.size > 50 * 1024 * 1024)) throw new Error("Each clip must be 50 MB or smaller.");
+    if (!("MediaRecorder" in window) || !HTMLCanvasElement.prototype.captureStream) throw new Error("Video export is not supported by this browser. Try the latest Chrome.");
+    const canvas = document.createElement("canvas"); canvas.width = 720; canvas.height = 1280;
+    const ctx = canvas.getContext("2d"); if (!ctx) throw new Error("Could not start video editor.");
+    const canvasStream = canvas.captureStream(30);
+    const audioContext = new AudioContext();
+    const audioOut = audioContext.createMediaStreamDestination();
+    const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus") ? "video/webm;codecs=vp9,opus" : "video/webm";
+    const recorder = new MediaRecorder(new MediaStream([...canvasStream.getVideoTracks(), ...audioOut.stream.getAudioTracks()]), { mimeType: mime });
+    const chunks: BlobPart[] = [];
+    recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+    const done = new Promise<Blob>((resolve, reject) => {
+      recorder.onstop = () => resolve(new Blob(chunks, { type: "video/webm" }));
+      recorder.onerror = () => reject(new Error("Video export failed. Please try a shorter clip."));
+    });
+    const musicUrl = reelMusicFile ? URL.createObjectURL(reelMusicFile) : "";
+    let music: HTMLAudioElement | null = null;
+    let musicSource: MediaElementAudioSourceNode | null = null;
+    if (musicUrl) {
+      music = new Audio(musicUrl); music.loop = true; music.preload = "auto";
+      musicSource = audioContext.createMediaElementSource(music);
+      musicSource.connect(audioOut);
+    }
+    const filterMap: Record<string,string> = { normal:"none", warm:"sepia(.28) saturate(1.25)", mono:"grayscale(1)", vivid:"saturate(1.7) contrast(1.08)", fade:"saturate(.7) contrast(.88) brightness(1.08)", cool:"hue-rotate(12deg) saturate(1.1)" };
+    let stopped = false;
+    const draw = () => {
+      if (stopped) return;
+      ctx.fillStyle = "#08090c"; ctx.fillRect(0,0,canvas.width,canvas.height);
+      const active = document.querySelector<HTMLVideoElement>("video[data-reel-export-active='true']");
+      if (active && active.readyState >= 2) {
+        ctx.save(); ctx.filter = filterMap[reelFilter] || "none";
+        const scale = Math.min(canvas.width / active.videoWidth, canvas.height / active.videoHeight);
+        const w = active.videoWidth * scale, h = active.videoHeight * scale;
+        ctx.drawImage(active, (canvas.width-w)/2, (canvas.height-h)/2, w, h); ctx.restore();
+        if (reelOverlayText.trim()) {
+          ctx.save(); ctx.font = "bold 54px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.lineWidth = 5; ctx.strokeStyle = "rgba(0,0,0,.8)"; ctx.fillStyle = "white";
+          const words = reelOverlayText.trim().split(/\s+/); const lines: string[] = []; let line = "";
+          for (const word of words) { const test = line ? line + " " + word : word; if (ctx.measureText(test).width > 620 && line) { lines.push(line); line = word; } else line = test; }
+          if (line) lines.push(line);
+          const top = canvas.height * .4 - (lines.length-1)*32;
+          lines.slice(0,3).forEach((value,index)=>{ctx.strokeText(value,canvas.width/2,top+index*66);ctx.fillText(value,canvas.width/2,top+index*66);}); ctx.restore();
+        }
+      }
+      requestAnimationFrame(draw);
+    };
+    const playVideo = async (file: File, index: number) => new Promise<void>(async (resolve,reject) => {
+      const url = URL.createObjectURL(file); const video = document.createElement("video");
+      video.preload = "auto"; video.playsInline = true; video.src = url; video.dataset.reelExportActive = "true";
+      video.style.position = "fixed"; video.style.left = "-10000px"; document.body.appendChild(video);
+      let source: MediaElementAudioSourceNode | null = null;
+      try {
+        await new Promise<void>((ok,fail)=>{video.onloadedmetadata=()=>ok();video.onerror=()=>fail(new Error("Could not read clip: "+file.name));});
+        source = audioContext.createMediaElementSource(video); source.connect(audioOut);
+        const start = index === 0 ? Math.min(reelTrimStart, Math.max(0,video.duration-.1)) : 0;
+        const end = index === 0 && reelTrimEnd > start ? Math.min(reelTrimEnd,video.duration) : video.duration;
+        video.currentTime = start; video.playbackRate = reelSpeed;
+        video.onended = finish;
+        function finish(){ video.pause(); video.removeAttribute("data-reel-export-active"); source?.disconnect(); video.remove(); URL.revokeObjectURL(url); resolve(); }
+        video.ontimeupdate = () => { if (video.currentTime >= end) finish(); };
+        await video.play();
+        setReelExportProgress(Math.round((index/clips.length)*100));
+      } catch(error) { source?.disconnect(); video.remove(); URL.revokeObjectURL(url); reject(error); }
+    });
+    try {
+      await audioContext.resume();
+      if (music) { await music.play().catch(()=>{}); }
+      recorder.start(250); draw();
+      for (let i=0;i<clips.length;i++) await playVideo(clips[i],i);
+      stopped = true;
+      if (music) music.pause();
+      recorder.stop();
+      const blob = await done;
+      if (!blob.size) throw new Error("Export produced an empty video. Please try again.");
+      if (blob.size > 50 * 1024 * 1024) throw new Error("The edited video is over 50 MB. Use shorter clips or remove background music and try again.");
+      return new File([blob], "theyapper-edited-reel.webm", { type: "video/webm", lastModified: Date.now() });
+    } finally {
+      stopped = true; if (recorder.state !== "inactive") recorder.stop();
+      canvasStream.getTracks().forEach(track=>track.stop()); audioOut.stream.getTracks().forEach(track=>track.stop());
+      if (musicSource) musicSource.disconnect(); if (music) music.pause();
+      if (musicUrl) URL.revokeObjectURL(musicUrl);
+      await audioContext.close().catch(()=>{}); setReelExportProgress(0);
+    }
+  }
+
   async function publishReel() {
     if (!client || !user) { setAuthMode("signin"); say("Sign in to upload a Reel."); return; }
     if (!reelFile) { say("Choose a video first."); return; }
-    if (reelFile.size > 50 * 1024 * 1024) { say("Reels must be 50 MB or smaller."); return; }
+    if (reelFile.size > 50 * 1024 * 1024 || reelExtraFiles.some(file => file.size > 50 * 1024 * 1024)) { say("Each clip must be 50 MB or smaller."); return; }
     if (!["video/mp4", "video/webm", "video/quicktime"].includes(reelFile.type)) { say("Choose an MP4, WebM or MOV video."); return; }
     setReelBusy(true);
     const extension = reelFile.name.split(".").pop()?.toLowerCase() || "mp4";
@@ -465,12 +556,12 @@ export default function Platform({ page, param = "" }: Props) {
     const { error: uploadError } = await client.storage.from("reel-videos").upload(path, reelFile, { contentType: reelFile.type, upsert: false });
     if (uploadError) { setReelBusy(false); say("Video upload failed: " + uploadError.message); return; }
     const videoUrl = client.storage.from("reel-videos").getPublicUrl(path).data.publicUrl;
-    const { error } = await client.from("reels").insert({ user_id: user.id, video_url: videoUrl, caption: reelCaption.trim().slice(0, 1000), filter_name: reelFilter, playback_speed: reelSpeed, trim_start: reelTrimStart, trim_end: reelTrimEnd > 0 ? reelTrimEnd : null, overlay_text: reelOverlayText.trim().slice(0, 100) });
+    const { error } = await client.from("reels").insert({ user_id: user.id, video_url: videoUrl, caption: reelCaption.trim().slice(0, 1000), filter_name: "normal", playback_speed: 1, trim_start: 0, trim_end: null, overlay_text: "" });
     if (error) {
       await client.storage.from("reel-videos").remove([path]);
       setReelBusy(false); say("Reel could not be published: " + error.message); return;
     }
-    setReelFile(null); setReelCaption(""); setReelOverlayText(""); setReelFilter("normal"); setReelSpeed(1); setReelTrimStart(0); setReelTrimEnd(0); setReelBusy(false);
+    setReelFile(null); setReelExtraFiles([]); setReelMusicFile(null); setReelCaption(""); setReelOverlayText(""); setReelFilter("normal"); setReelSpeed(1); setReelTrimStart(0); setReelTrimEnd(0); setReelBusy(false);
     const picker = document.getElementById("reel-video-picker") as HTMLInputElement | null;
     if (picker) picker.value = "";
     say("Your Reel is live."); await loadReels();
@@ -633,12 +724,16 @@ export default function Platform({ page, param = "" }: Props) {
           <summary><span className="reel-upload-icon"><Upload size={18}/></span><span><b>Create a Reel</b><small>Trim · filters · speed · text overlay</small></span><Plus size={18}/></summary>
           <section className="reel-upload-panel reel-editor-panel">
             <label className="reel-file-picker"><Clapperboard size={18}/><span>{reelFile ? reelFile.name : "Choose a video to edit"}</span><input id="reel-video-picker" type="file" accept="video/mp4,video/webm,video/quicktime" onChange={e=>{const file=e.target.files?.[0]||null;if(file&&file.size>50*1024*1024){say("Video must be 50 MB or smaller.");e.target.value="";return;}if(file&&!["video/mp4","video/webm","video/quicktime"].includes(file.type)){say("Choose MP4, WebM or MOV.");e.target.value="";return;}setReelFile(file);}}/></label>
+            <label className="reel-file-picker reel-extra-picker"><Clapperboard size={18}/><span>{reelExtraFiles.length ? reelExtraFiles.length + " extra clip(s) queued — in selected order" : "Add more clips (optional)"}</span><input type="file" accept="video/mp4,video/webm,video/quicktime" multiple onChange={e=>{const files=Array.from(e.target.files||[]);if(files.some(file=>file.size>50*1024*1024)){say("Each clip must be 50 MB or smaller.");e.target.value="";return;}if(files.some(file=>!["video/mp4","video/webm","video/quicktime"].includes(file.type))){say("Choose MP4, WebM or MOV clips.");e.target.value="";return;}setReelExtraFiles(old=>[...old,...files].slice(0,5));e.target.value="";}}/></label>
+            {reelExtraFiles.length>0&&<div className="reel-extra-list"><b>Clip sequence</b>{reelExtraFiles.map((file,index)=><div key={file.name+index}><span>{index+2}. {file.name}</span><button type="button" onClick={()=>setReelExtraFiles(old=>old.filter((_,i)=>i!==index))} aria-label={"Remove "+file.name}>Remove</button></div>)}<small>First clip is the main video; extra clips play in this order.</small></div>}
+            <label className="reel-file-picker reel-music-picker"><Music size={18}/><span>{reelMusicFile ? "Audio: "+reelMusicFile.name : "Add your own background music (optional)"}</span><input type="file" accept="audio/*" onChange={e=>setReelMusicFile(e.target.files?.[0]||null)}/></label>
+            {reelMusicFile&&<button type="button" className="outline-button small" onClick={()=>{setReelMusicFile(null);const el=document.getElementById("reel-music-picker") as HTMLInputElement|null;if(el)el.value="";}}>Remove music</button>}
             {reelPreviewUrl && <div className="reel-editor-preview-wrap"><video id="reel-editor-preview" className="reel-editor-preview" src={reelPreviewUrl} controls playsInline onLoadedMetadata={e=>{const d=e.currentTarget.duration;if(Number.isFinite(d)){setReelDuration(d);setReelTrimEnd(old=>old>0?Math.min(old,d):d);}}} style={{filter:({normal:"none",warm:"sepia(.28) saturate(1.25)",mono:"grayscale(1)",vivid:"saturate(1.7) contrast(1.08)",fade:"saturate(.7) contrast(.88) brightness(1.08)",cool:"hue-rotate(12deg) saturate(1.1)"} as Record<string,string>)[reelFilter]}}/><span className="reel-editor-preview-label">LIVE PREVIEW</span></div>}
             <label className="reel-editor-label">Caption <textarea value={reelCaption} onChange={e=>setReelCaption(e.target.value.slice(0,1000))} maxLength={1000} placeholder="Write a caption…"/></label>
             <label className="reel-editor-label">Text on video <input value={reelOverlayText} onChange={e=>setReelOverlayText(e.target.value.slice(0,100))} maxLength={100} placeholder="Add a title or short text"/></label>
             <div className="reel-editor-controls"><label>Filter<select value={reelFilter} onChange={e=>setReelFilter(e.target.value)}><option value="normal">Original</option><option value="warm">Warm</option><option value="mono">Black & white</option><option value="vivid">Vivid</option><option value="fade">Soft / Fade</option><option value="cool">Cool</option></select></label><label>Playback speed<select value={reelSpeed} onChange={e=>setReelSpeed(Number(e.target.value))}>{[0.5,0.75,1,1.25,1.5,2].map(v=><option key={v} value={v}>{v}×</option>)}</select></label></div>
             {reelPreviewUrl&&reelDuration>0&&<div className="reel-trim-controls"><b>Trim video</b><small>Choose start/end points · {reelDuration.toFixed(1)} sec total</small><label>Start · {reelTrimStart.toFixed(1)}s<input type="range" min="0" max={Math.max(0,reelDuration-0.5)} step="0.1" value={Math.min(reelTrimStart,Math.max(0,reelDuration-0.5))} onChange={e=>{const v=Number(e.target.value);setReelTrimStart(v);const el=document.getElementById("reel-editor-preview") as HTMLVideoElement|null;if(el)el.currentTime=v;if(reelTrimEnd>0&&v>=reelTrimEnd)setReelTrimEnd(Math.min(reelDuration,v+0.5));}}/></label><label>End · {(reelTrimEnd||reelDuration).toFixed(1)}s<input type="range" min={Math.min(reelDuration,reelTrimStart+0.5)} max={reelDuration} step="0.1" value={Math.min(reelDuration,Math.max(reelTrimStart+0.5,reelTrimEnd||reelDuration))} onChange={e=>setReelTrimEnd(Number(e.target.value))}/></label></div>}
-            <div className="reel-upload-footer"><small>{reelCaption.length}/1000 · Max 50 MB</small><button className="primary-button" disabled={reelBusy||!reelFile} onClick={()=>void publishReel()}>{reelBusy?<LoaderCircle size={16} className="spin"/>:<Upload size={16}/>} {reelBusy?"Uploading…":"Publish Reel"}</button></div>
+            <div className="reel-upload-footer"><small>{reelCaption.length}/1000 · up to 6 clips · 50 MB each<br/>Export renders trim, speed, filter, text and audio into WebM.</small><button className="primary-button" disabled={reelBusy||!reelFile} onClick={()=>void publishReel()}>{reelBusy?<LoaderCircle size={16} className="spin"/>:<Upload size={16}/>} {reelBusy?(reelExportProgress>0?"Rendering "+reelExportProgress+"%…":"Rendering & uploading…"):"Export & publish"}</button></div>
           </section>
         </details>
         <div className="reels-feed-heading"><h3>For you</h3><span>{reels.length} videos</span></div>
