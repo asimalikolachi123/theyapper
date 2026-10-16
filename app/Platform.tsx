@@ -534,6 +534,7 @@ export default function Platform({ page, param = "" }: Props) {
       recorder.stop();
       const blob = await done;
       if (!blob.size) throw new Error("Export produced an empty video. Please try again.");
+      if (blob.size > 50 * 1024 * 1024) throw new Error("The edited video is over 50 MB. Use shorter clips or remove background music and try again.");
       return new File([blob], "theyapper-edited-reel.webm", { type: "video/webm", lastModified: Date.now() });
     } finally {
       stopped = true; if (recorder.state !== "inactive") recorder.stop();
@@ -555,7 +556,7 @@ export default function Platform({ page, param = "" }: Props) {
     const { error: uploadError } = await client.storage.from("reel-videos").upload(path, reelFile, { contentType: reelFile.type, upsert: false });
     if (uploadError) { setReelBusy(false); say("Video upload failed: " + uploadError.message); return; }
     const videoUrl = client.storage.from("reel-videos").getPublicUrl(path).data.publicUrl;
-    const { error } = await client.from("reels").insert({ user_id: user.id, video_url: videoUrl, caption: reelCaption.trim().slice(0, 1000), filter_name: "normal", playback_speed: 1, trim_start: 0, trim_end: null, overlay_text: reelOverlayText.trim().slice(0, 100) });
+    const { error } = await client.from("reels").insert({ user_id: user.id, video_url: videoUrl, caption: reelCaption.trim().slice(0, 1000), filter_name: "normal", playback_speed: 1, trim_start: 0, trim_end: null, overlay_text: "" });
     if (error) {
       await client.storage.from("reel-videos").remove([path]);
       setReelBusy(false); say("Reel could not be published: " + error.message); return;
